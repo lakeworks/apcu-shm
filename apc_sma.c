@@ -61,8 +61,6 @@ struct sma_header_t {
 #endif
 };
 
-#define SMA_DEFAULT_SEGSIZE (30*1024*1024)
-
 #define SMA_HDR(sma)  ((sma_header_t*)sma->shmaddr)
 #define SMA_ADDR(sma) ((char *)sma->shmaddr)
 #define SMA_LCK(sma)  ((SMA_HDR(sma))->sma_lock)
@@ -105,6 +103,31 @@ struct block_t {
 #endif
 
 #define MINBLOCKSIZE (ALIGNWORD(1) + ALIGNWORD(sizeof(block_t)))
+
+/* Initialize the free-list blocks in a freshly allocated SMA segment.
+ * Called by both apc_sma_init() and apc_sma_init_from_addr(). */
+static void sma_init_free_list(sma_header_t *smaheader) {
+	block_t *first = BLOCKAT(ALIGNWORD(sizeof(sma_header_t)));
+	first->size = 0;
+	first->fnext = ALIGNWORD(sizeof(sma_header_t)) + ALIGNWORD(sizeof(block_t));
+	first->fprev = 0;
+	first->prev_size = 0;
+	SET_CANARY(first);
+
+	block_t *empty = BLOCKAT(first->fnext);
+	empty->size = smaheader->avail;
+	empty->fnext = OFFSET(empty) + empty->size;
+	empty->fprev = ALIGNWORD(sizeof(sma_header_t));
+	empty->prev_size = 0;
+	SET_CANARY(empty);
+
+	block_t *last = BLOCKAT(empty->fnext);
+	last->size = 0;
+	last->fnext = 0;
+	last->fprev = OFFSET(empty);
+	last->prev_size = empty->size;
+	SET_CANARY(last);
+}
 
 /* How many extra blocks to check for a better fit */
 #define BEST_FIT_LIMIT 3
@@ -286,26 +309,7 @@ PHP_APCU_API void apc_sma_init(apc_sma_t* sma, void** data, apc_sma_expunge_f ex
 	smaheader->avail = sma->size - ALIGNWORD(sizeof(sma_header_t)) - ALIGNWORD(sizeof(block_t)) - ALIGNWORD(sizeof(block_t));
 	sma->max_alloc_size = smaheader->avail - ALIGNWORD(sizeof(block_t));
 
-	block_t *first = BLOCKAT(ALIGNWORD(sizeof(sma_header_t)));
-	first->size = 0;
-	first->fnext = ALIGNWORD(sizeof(sma_header_t)) + ALIGNWORD(sizeof(block_t));
-	first->fprev = 0;
-	first->prev_size = 0;
-	SET_CANARY(first);
-
-	block_t *empty = BLOCKAT(first->fnext);
-	empty->size = smaheader->avail;
-	empty->fnext = OFFSET(empty) + empty->size;
-	empty->fprev = ALIGNWORD(sizeof(sma_header_t));
-	empty->prev_size = 0;
-	SET_CANARY(empty);
-
-	block_t *last = BLOCKAT(empty->fnext);
-	last->size = 0;
-	last->fnext = 0;
-	last->fprev =  OFFSET(empty);
-	last->prev_size = empty->size;
-	SET_CANARY(last);
+	sma_init_free_list(smaheader);
 }
 
 PHP_APCU_API void apc_sma_detach(apc_sma_t* sma) {
@@ -591,26 +595,7 @@ PHP_APCU_API void apc_sma_init_from_addr(
 	smaheader->seg_size = sma->size;
 	smaheader->init_complete = 0;
 
-	block_t *first = BLOCKAT(ALIGNWORD(sizeof(sma_header_t)));
-	first->size = 0;
-	first->fnext = ALIGNWORD(sizeof(sma_header_t)) + ALIGNWORD(sizeof(block_t));
-	first->fprev = 0;
-	first->prev_size = 0;
-	SET_CANARY(first);
-
-	block_t *empty = BLOCKAT(first->fnext);
-	empty->size = smaheader->avail;
-	empty->fnext = OFFSET(empty) + empty->size;
-	empty->fprev = ALIGNWORD(sizeof(sma_header_t));
-	empty->prev_size = 0;
-	SET_CANARY(empty);
-
-	block_t *last = BLOCKAT(empty->fnext);
-	last->size = 0;
-	last->fnext = 0;
-	last->fprev = OFFSET(empty);
-	last->prev_size = empty->size;
-	SET_CANARY(last);
+	sma_init_free_list(smaheader);
 }
 
 PHP_APCU_API void apc_sma_attach(

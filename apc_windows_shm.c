@@ -135,15 +135,20 @@ apc_windows_shm_t *apc_windows_shm_create(const char *shm_name, size_t size)
 		mapping_name            /* named mapping */
 	);
 
-	is_new = (GetLastError() != ERROR_ALREADY_EXISTS);
+	/* Capture GetLastError() immediately — apc_windows_free_dacl() below
+	 * calls LocalFree() which may reset it to 0 on success. */
+	{
+		DWORD create_err = GetLastError();
+		is_new = (create_err != ERROR_ALREADY_EXISTS);
 
-	/* Free DACL resources regardless of CreateFileMapping success */
-	apc_windows_free_dacl(&sd_info);
+		/* Free DACL resources regardless of CreateFileMapping success */
+		apc_windows_free_dacl(&sd_info);
 
-	if (!mapping) {
-		apc_error("apc_windows_shm_create: CreateFileMapping(%s, %zu bytes) failed: %lu",
-			mapping_name, size, GetLastError());
-		return NULL;
+		if (!mapping) {
+			apc_error("apc_windows_shm_create: CreateFileMapping(%s, %zu bytes) failed: %lu",
+				mapping_name, size, create_err);
+			return NULL;
+		}
 	}
 
 	addr = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, 0);

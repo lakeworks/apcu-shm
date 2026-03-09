@@ -172,4 +172,7 @@ PHP_APCU_API zend_bool apc_sma_is_init_complete(apc_sma_t *sma);
 /* ALIGNWORD: pad up x, aligned to the system's word boundary */
 #define ALIGNWORD(x) ZEND_MM_ALIGNED_SIZE(x)
 
+/* Default shared memory segment size (30 MB) */
+#define SMA_DEFAULT_SEGSIZE (30*1024*1024)
+
 #endif

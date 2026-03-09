@@ -277,7 +277,7 @@ static PHP_MINIT_FUNCTION(apcu)
 				/* ====== Named shared memory path (cross-process) ====== */
 				HANDLE init_lock;
 				apc_windows_shm_t *shm;
-				size_t shm_size = ALIGNWORD(APCG(shm_size) > 0 ? APCG(shm_size) : (30*1024*1024));
+				size_t shm_size = ALIGNWORD(APCG(shm_size) > 0 ? APCG(shm_size) : SMA_DEFAULT_SEGSIZE);
 
 				/* Acquire init mutex to serialize first-time setup */
 				init_lock = apc_windows_shm_init_lock(APCG(shm_name));
@@ -290,6 +290,10 @@ static PHP_MINIT_FUNCTION(apcu)
 						"APCu: Failed to create named shared memory segment '%s' (%zu bytes)",
 						APCG(shm_name), shm_size);
 				}
+
+				/* Store the shm handle early so that apc_sma_detach() takes
+				 * the correct cleanup path if an error occurs below. */
+				apc_sma.win_shm = shm;
 
 				if (shm->is_new) {
 					/* First process: full initialization */
@@ -356,9 +360,6 @@ static PHP_MINIT_FUNCTION(apcu)
 							APCG(shm_name));
 					}
 				}
-
-				/* Store the shm handle for cleanup on MSHUTDOWN */
-				apc_sma.win_shm = shm;
 
 				apc_windows_shm_init_unlock(init_lock);
 			} else

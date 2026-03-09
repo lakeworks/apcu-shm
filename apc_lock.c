@@ -49,6 +49,21 @@
  * Applies to: dead writer detection (rlock + wlock) and stuck reader drain. */
 #define APC_LOCK_TIMEOUT_MS     30000
 
+/* Adaptive spin: brief busy-wait, then yield to OS scheduler. */
+static inline void apc_lock_spin_wait(int spins) {
+	if (spins < APC_LOCK_SPIN_YIELD) {
+		YieldProcessor();
+	} else {
+		SwitchToThread();
+	}
+}
+
+/* Clear the writer flag and PID atomically. */
+static inline void apc_lock_clear_writer(apc_lock_t *lock) {
+	InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
+	InterlockedExchange(&lock->writer, 0);
+}
+
 /* Check if a process is still alive. Returns 1 if alive, 0 if dead/unknown. */
 static inline int apc_lock_process_alive(DWORD pid) {
 	HANDLE hProc;
@@ -93,12 +108,7 @@ static inline zend_bool apc_lock_rlock_impl(apc_lock_t *lock) {
 		 * Plain volatile read is naturally atomic for aligned LONG on x86/x64.
 		 * On ARM64, volatile provides acquire semantics via MSVC /volatile:ms. */
 		while (lock->writer) {
-			++spins;
-			if (spins < APC_LOCK_SPIN_YIELD) {
-				YieldProcessor();
-			} else {
-				SwitchToThread();
-			}
+			apc_lock_spin_wait(++spins);
 
 			/* Periodically check if the writer process has crashed.
 			 * Without this, readers spin forever if a writer dies while
@@ -106,8 +116,7 @@ static inline zend_bool apc_lock_rlock_impl(apc_lock_t *lock) {
 			if (spins >= APC_LOCK_SPIN_CRASH_CHECK && (spins & 0x3FF) == 0) {
 				DWORD holder_pid = lock->writer_pid;
 				if (holder_pid != 0 && !apc_lock_process_alive(holder_pid)) {
-					InterlockedExchange(&lock->writer, 0);
-					InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
+					apc_lock_clear_writer(lock);
 					break;
 				}
 
@@ -115,8 +124,7 @@ static inline zend_bool apc_lock_rlock_impl(apc_lock_t *lock) {
 				if (start_tick == 0) {
 					start_tick = GetTickCount64();
 				} else if (GetTickCount64() - start_tick > APC_LOCK_TIMEOUT_MS) {
-					InterlockedExchange(&lock->writer, 0);
-					InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
+					apc_lock_clear_writer(lock);
 					break;
 				}
 			}
@@ -157,11 +165,7 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 				int drain_spins = 0;
 				ULONGLONG drain_start = GetTickCount64();
 				while (lock->readers) {
-					if (++drain_spins < APC_LOCK_SPIN_YIELD) {
-						YieldProcessor();
-					} else {
-						SwitchToThread();
-					}
+					apc_lock_spin_wait(++drain_spins);
 
 					/* Check wall-clock timeout every 4096 spins to avoid
 					 * calling GetTickCount64 on every iteration. */
@@ -188,8 +192,7 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 			DWORD holder_pid = lock->writer_pid;
 			if (holder_pid != 0 && holder_pid != my_pid
 				&& !apc_lock_process_alive(holder_pid)) {
-				InterlockedExchange(&lock->writer, 0);
-				InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
+				apc_lock_clear_writer(lock);
 				spins = 0;
 				start_tick = 0;
 				continue;
@@ -199,19 +202,14 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 			if (start_tick == 0) {
 				start_tick = GetTickCount64();
 			} else if (GetTickCount64() - start_tick > APC_LOCK_TIMEOUT_MS) {
-				InterlockedExchange(&lock->writer, 0);
-				InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
+				apc_lock_clear_writer(lock);
 				spins = 0;
 				start_tick = 0;
 				continue;
 			}
 		}
 
-		if (spins < APC_LOCK_SPIN_YIELD) {
-			YieldProcessor();
-		} else {
-			SwitchToThread();
-		}
+		apc_lock_spin_wait(spins);
 	}
 }
 
@@ -224,8 +222,7 @@ PHP_APCU_API zend_bool apc_lock_wunlock(apc_lock_t *lock) {
 	 * correctness on ARM64 Windows where Interlocked ops may have weaker
 	 * ordering guarantees. */
 	MemoryBarrier();
-	InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
-	InterlockedExchange(&lock->writer, 0);
+	apc_lock_clear_writer(lock);
 	return 1;
 }
 
