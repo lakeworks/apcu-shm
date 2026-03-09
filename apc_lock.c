@@ -132,13 +132,21 @@ static inline zend_bool apc_lock_rlock_impl(apc_lock_t *lock) {
 
 				/* Wall-clock safety timeout (handles PID reuse edge case).
 				 * Snapshot the PID at timeout start so we only clear THIS
-				 * holder, not a new one that acquired the lock since. */
+				 * holder, not a new one that acquired the lock since.
+				 * Only clear if the holder is actually dead — a live process
+				 * may legitimately hold the write lock for a long time
+				 * (e.g. apcu_entry() running a slow user callback). */
 				if (start_tick == 0) {
 					start_tick = GetTickCount64();
 					timeout_pid = holder_pid;
 				} else if (GetTickCount64() - start_tick > APC_LOCK_TIMEOUT_MS) {
-					apc_lock_try_clear_writer(lock, timeout_pid);
-					break;
+					if (timeout_pid != 0 && !apc_lock_process_alive(timeout_pid)) {
+						apc_lock_try_clear_writer(lock, timeout_pid);
+						break;
+					}
+					/* Process is alive — reset timeout and keep waiting. */
+					start_tick = GetTickCount64();
+					timeout_pid = lock->writer_pid;
 				}
 			}
 		}
@@ -220,17 +228,25 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 			}
 
 			/* Wall-clock safety timeout (handles PID reuse edge case).
-			 * Snapshot the PID so we only clear THIS holder. */
+			 * Snapshot the PID so we only clear THIS holder.
+			 * Only clear if the holder is actually dead — a live process
+			 * may legitimately hold the write lock for a long time
+			 * (e.g. apcu_entry() running a slow user callback). */
 			if (start_tick == 0) {
 				start_tick = GetTickCount64();
 				timeout_pid = holder_pid;
 			} else if (GetTickCount64() - start_tick > APC_LOCK_TIMEOUT_MS) {
-				if (apc_lock_try_clear_writer(lock, timeout_pid)) {
-					spins = 0;
-					start_tick = 0;
-					timeout_pid = 0;
-					continue;
+				if (timeout_pid != 0 && !apc_lock_process_alive(timeout_pid)) {
+					if (apc_lock_try_clear_writer(lock, timeout_pid)) {
+						spins = 0;
+						start_tick = 0;
+						timeout_pid = 0;
+						continue;
+					}
 				}
+				/* Process is alive — reset timeout and keep waiting. */
+				start_tick = GetTickCount64();
+				timeout_pid = lock->writer_pid;
 			}
 		}
 

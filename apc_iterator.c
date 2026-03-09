@@ -211,7 +211,7 @@ static size_t apc_iterator_fetch_active(apc_iterator_t *iterator) {
 	}
 
 	php_apc_try {
-		while (count <= iterator->chunk_size && iterator->slot_idx < cache->nslots) {
+		while (count < iterator->chunk_size && iterator->slot_idx < cache->nslots) {
 			uintptr_t entry_offset = cache->slots[iterator->slot_idx];
 			while (entry_offset) {
 				apc_cache_entry_t *entry = ENTRYAT(entry_offset);

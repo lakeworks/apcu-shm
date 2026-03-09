@@ -154,13 +154,18 @@ PHP_APCU_API void apc_sma_attach(
 /*
  * Store cache layout info in the SMA header (for future attaching processes).
  */
-PHP_APCU_API void apc_sma_set_cache_info(apc_sma_t *sma, size_t cache_header_offset, size_t nslots);
+PHP_APCU_API void apc_sma_set_cache_info(apc_sma_t *sma, size_t cache_header_offset, size_t nslots, const char *serializer_name);
 
 /*
  * Retrieve cache layout info from the SMA header.
  */
 PHP_APCU_API size_t apc_sma_get_cache_offset(apc_sma_t *sma);
 PHP_APCU_API size_t apc_sma_get_cache_nslots(apc_sma_t *sma);
+
+/*
+ * Retrieve the serializer name stored by the creating process.
+ */
+PHP_APCU_API const char *apc_sma_get_serializer_name(apc_sma_t *sma);
 
 /*
  * Check if the creating process has finished initializing all shared structures.

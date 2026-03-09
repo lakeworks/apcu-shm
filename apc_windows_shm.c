@@ -201,11 +201,15 @@ apc_windows_shm_t *apc_windows_shm_create(const char *shm_name, size_t size)
 		}
 		actual_size = mbi.RegionSize;
 
-		/* If we're attaching to an existing mapping that is smaller than
-		 * requested, use the actual size — it's all we have access to. */
-		if (!is_new && actual_size < size) {
-			apc_warning("apc_windows_shm_create: mapped region (%zu bytes) is smaller "
-				"than requested (%zu bytes) — using actual size", actual_size, size);
+		/* When attaching to an existing mapping, always use the actual
+		 * mapped size — CreateFileMapping ignores the requested size for
+		 * existing sections. Using the requested size would either truncate
+		 * bounds (if actual > requested) or inflate them (if actual < requested). */
+		if (!is_new && actual_size != size) {
+			if (actual_size < size) {
+				apc_warning("apc_windows_shm_create: mapped region (%zu bytes) is smaller "
+					"than requested (%zu bytes) — using actual size", actual_size, size);
+			}
 			size = actual_size;
 		}
 	}

@@ -320,7 +320,8 @@ static PHP_MINIT_FUNCTION(apcu)
 					/* Store layout info for future attaching processes */
 					apc_sma_set_cache_info(&apc_sma,
 						(size_t)((char *)apc_user_cache->header - (char *)apc_sma.shmaddr),
-						apc_user_cache->nslots);
+						apc_user_cache->nslots,
+						APCG(serializer_name));
 				} else {
 					/* Attaching to existing segment: skip initialization.
 					 * Pass shm->size (validated by VirtualQuery) rather than
@@ -349,6 +350,23 @@ static PHP_MINIT_FUNCTION(apcu)
 									APCG(shm_name));
 							}
 							SwitchToThread();
+						}
+					}
+
+					/* Validate serializer matches creator's choice.
+					 * Different serializers produce incompatible byte
+					 * streams — using the wrong one corrupts data. */
+					{
+						const char *creator_ser = apc_sma_get_serializer_name(&apc_sma);
+						const char *local_ser = APCG(serializer_name) ? APCG(serializer_name) : "";
+						if (creator_ser[0] && strcmp(creator_ser, local_ser) != 0) {
+							apc_windows_shm_init_unlock(init_lock);
+							apc_windows_shm_detach(shm);
+							zend_error_noreturn(E_CORE_ERROR,
+								"APCu: Serializer mismatch for segment '%s': "
+								"creator uses '%s' but this process has apc.serializer='%s'. "
+								"All workers sharing a segment must use the same serializer.",
+								APCG(shm_name), creator_ser, local_ser);
 						}
 					}
 

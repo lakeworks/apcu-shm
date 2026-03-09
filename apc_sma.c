@@ -57,6 +57,7 @@ struct sma_header_t {
 	size_t nslots;               /* number of cache hash slots */
 	size_t max_alloc_size;       /* max allocatable size (for attaching processes) */
 	size_t seg_size;             /* actual segment size (for attaching processes) */
+	char serializer_name[32];    /* serializer used by creator (for mismatch detection) */
 	volatile LONG init_complete; /* 1 when all shared structures are fully initialized */
 #endif
 };
@@ -659,12 +660,19 @@ PHP_APCU_API void apc_sma_attach(
 	}
 }
 
-PHP_APCU_API void apc_sma_set_cache_info(apc_sma_t *sma, size_t cache_header_offset, size_t nslots) {
+PHP_APCU_API void apc_sma_set_cache_info(apc_sma_t *sma, size_t cache_header_offset, size_t nslots, const char *serializer_name) {
 	sma_header_t *smaheader = SMA_HDR(sma);
 	smaheader->cache_header_offset = cache_header_offset;
 	smaheader->nslots = nslots;
+
+	/* Store serializer name so attaching processes can detect mismatches. */
+	memset(smaheader->serializer_name, 0, sizeof(smaheader->serializer_name));
+	if (serializer_name && serializer_name[0]) {
+		strncpy(smaheader->serializer_name, serializer_name, sizeof(smaheader->serializer_name) - 1);
+	}
+
 	/* Full memory barrier + set completion flag LAST so attaching processes
-	 * see consistent cache_header_offset and nslots values. */
+	 * see consistent cache_header_offset, nslots, and serializer values. */
 	MemoryBarrier();
 	InterlockedExchange(&smaheader->init_complete, 1);
 }
@@ -675,6 +683,10 @@ PHP_APCU_API size_t apc_sma_get_cache_offset(apc_sma_t *sma) {
 
 PHP_APCU_API size_t apc_sma_get_cache_nslots(apc_sma_t *sma) {
 	return SMA_HDR(sma)->nslots;
+}
+
+PHP_APCU_API const char *apc_sma_get_serializer_name(apc_sma_t *sma) {
+	return SMA_HDR(sma)->serializer_name;
 }
 
 PHP_APCU_API zend_bool apc_sma_is_init_complete(apc_sma_t *sma) {
