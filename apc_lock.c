@@ -39,10 +39,38 @@
  * Spin strategy: brief YieldProcessor(), then SwitchToThread() for longer waits.
  */
 
-/* Maximum spin iterations before checking for dead writer or forcing reset */
+/* Brief spin before yielding to OS scheduler */
 #define APC_LOCK_SPIN_YIELD     64
+/* Start checking for dead processes after this many spins */
 #define APC_LOCK_SPIN_CRASH_CHECK 1024
-#define APC_LOCK_SPIN_MAX       2000000
+/* Wall-clock timeout (ms) for crash recovery.
+ * Long enough to avoid false positives from OS thread descheduling under
+ * heavy load; short enough to recover from dead processes in production.
+ * Applies to: dead writer detection (rlock + wlock) and stuck reader drain. */
+#define APC_LOCK_TIMEOUT_MS     30000
+
+/* Check if a process is still alive. Returns 1 if alive, 0 if dead/unknown. */
+static inline int apc_lock_process_alive(DWORD pid) {
+	HANDLE hProc;
+	DWORD exit_code;
+
+	if (pid == 0) {
+		return 0;
+	}
+
+	hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+	if (!hProc) {
+		return 0;
+	}
+
+	if (GetExitCodeProcess(hProc, &exit_code) && exit_code != STILL_ACTIVE) {
+		CloseHandle(hProc);
+		return 0;
+	}
+
+	CloseHandle(hProc);
+	return 1;
+}
 
 PHP_APCU_API zend_bool apc_lock_init() {
 	return 1;
@@ -58,15 +86,39 @@ PHP_APCU_API zend_bool apc_lock_create(apc_lock_t *lock) {
 
 static inline zend_bool apc_lock_rlock_impl(apc_lock_t *lock) {
 	int spins = 0;
+	ULONGLONG start_tick = 0;
+
 	for (;;) {
 		/* Wait until no writer is active.
 		 * Plain volatile read is naturally atomic for aligned LONG on x86/x64.
 		 * On ARM64, volatile provides acquire semantics via MSVC /volatile:ms. */
 		while (lock->writer) {
-			if (++spins < APC_LOCK_SPIN_YIELD) {
+			++spins;
+			if (spins < APC_LOCK_SPIN_YIELD) {
 				YieldProcessor();
 			} else {
 				SwitchToThread();
+			}
+
+			/* Periodically check if the writer process has crashed.
+			 * Without this, readers spin forever if a writer dies while
+			 * holding the lock. */
+			if (spins >= APC_LOCK_SPIN_CRASH_CHECK && (spins & 0x3FF) == 0) {
+				DWORD holder_pid = lock->writer_pid;
+				if (holder_pid != 0 && !apc_lock_process_alive(holder_pid)) {
+					InterlockedExchange(&lock->writer, 0);
+					InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
+					break;
+				}
+
+				/* Wall-clock safety timeout (handles PID reuse edge case) */
+				if (start_tick == 0) {
+					start_tick = GetTickCount64();
+				} else if (GetTickCount64() - start_tick > APC_LOCK_TIMEOUT_MS) {
+					InterlockedExchange(&lock->writer, 0);
+					InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
+					break;
+				}
 			}
 		}
 
@@ -88,6 +140,7 @@ static inline zend_bool apc_lock_rlock_impl(apc_lock_t *lock) {
 static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 	DWORD my_pid = GetCurrentProcessId();
 	int spins = 0;
+	ULONGLONG start_tick = 0;
 
 	for (;;) {
 		/* Try to acquire the writer flag */
@@ -96,23 +149,31 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 			InterlockedExchange((volatile LONG *)&lock->writer_pid, (LONG)my_pid);
 
 			/* Wait for all readers to drain.
-			 * Note: readers is signed (LONG), so underflow from bugs would
-			 * produce a negative value (still non-zero). The APC_LOCK_SPIN_MAX
-			 * force-reset below handles this as a safety net. */
-			while (lock->readers) {
-				if (++spins < APC_LOCK_SPIN_YIELD) {
-					YieldProcessor();
-				} else {
-					SwitchToThread();
-				}
+			 * Use wall-clock timeout instead of spin count to avoid
+			 * false positives from OS thread descheduling under heavy load.
+			 * A descheduled reader holding a read lock for seconds is normal;
+			 * only a reader that has actually CRASHED warrants a force-reset. */
+			{
+				int drain_spins = 0;
+				ULONGLONG drain_start = GetTickCount64();
+				while (lock->readers) {
+					if (++drain_spins < APC_LOCK_SPIN_YIELD) {
+						YieldProcessor();
+					} else {
+						SwitchToThread();
+					}
 
-				/* Safety: if readers are stuck for too long, force-reset.
-				 * This handles the case where a reader process died. */
-				if (spins > APC_LOCK_SPIN_MAX) {
-					InterlockedExchange(&lock->readers, 0);
-					break;
+					/* Check wall-clock timeout every 4096 spins to avoid
+					 * calling GetTickCount64 on every iteration. */
+					if ((drain_spins & 0xFFF) == 0) {
+						if (GetTickCount64() - drain_start > APC_LOCK_TIMEOUT_MS) {
+							InterlockedExchange(&lock->readers, 0);
+							break;
+						}
+					}
 				}
 			}
+
 			/* Acquire barrier: ensure we see all prior writes from
 			 * other processes before we start modifying shared data. */
 			MemoryBarrier();
@@ -125,34 +186,25 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 		++spins;
 		if (spins >= APC_LOCK_SPIN_CRASH_CHECK && (spins & 0x3FF) == 0) {
 			DWORD holder_pid = lock->writer_pid;
-			if (holder_pid != 0 && holder_pid != my_pid) {
-				HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, holder_pid);
-				if (!hProc) {
-					/* Process doesn't exist anymore - force-reset the lock */
-					InterlockedExchange(&lock->writer, 0);
-					InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
-					spins = 0;
-					continue;
-				} else {
-					DWORD exit_code;
-					if (GetExitCodeProcess(hProc, &exit_code) && exit_code != STILL_ACTIVE) {
-						CloseHandle(hProc);
-						InterlockedExchange(&lock->writer, 0);
-						InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
-						spins = 0;
-						continue;
-					}
-					CloseHandle(hProc);
-				}
+			if (holder_pid != 0 && holder_pid != my_pid
+				&& !apc_lock_process_alive(holder_pid)) {
+				InterlockedExchange(&lock->writer, 0);
+				InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
+				spins = 0;
+				start_tick = 0;
+				continue;
 			}
-		}
 
-		/* Force-reset after excessive spinning (guards against PID reuse edge case) */
-		if (spins > APC_LOCK_SPIN_MAX) {
-			InterlockedExchange(&lock->writer, 0);
-			InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
-			spins = 0;
-			continue;
+			/* Wall-clock safety timeout (handles PID reuse edge case) */
+			if (start_tick == 0) {
+				start_tick = GetTickCount64();
+			} else if (GetTickCount64() - start_tick > APC_LOCK_TIMEOUT_MS) {
+				InterlockedExchange(&lock->writer, 0);
+				InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
+				spins = 0;
+				start_tick = 0;
+				continue;
+			}
 		}
 
 		if (spins < APC_LOCK_SPIN_YIELD) {

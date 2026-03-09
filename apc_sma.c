@@ -56,6 +56,7 @@ struct sma_header_t {
 	size_t cache_header_offset;  /* offset of apc_cache_header_t from segment base */
 	size_t nslots;               /* number of cache hash slots */
 	size_t max_alloc_size;       /* max allocatable size (for attaching processes) */
+	size_t seg_size;             /* actual segment size (for attaching processes) */
 	volatile LONG init_complete; /* 1 when all shared structures are fully initialized */
 #endif
 };
@@ -587,6 +588,7 @@ PHP_APCU_API void apc_sma_init_from_addr(
 	smaheader->cache_header_offset = 0;
 	smaheader->nslots = 0;
 	smaheader->max_alloc_size = sma->max_alloc_size;
+	smaheader->seg_size = sma->size;
 	smaheader->init_complete = 0;
 
 	block_t *first = BLOCKAT(ALIGNWORD(sizeof(sma_header_t)));
@@ -614,6 +616,8 @@ PHP_APCU_API void apc_sma_init_from_addr(
 PHP_APCU_API void apc_sma_attach(
 		apc_sma_t* sma, void** data, apc_sma_expunge_f expunge,
 		void *addr, size_t size) {
+	sma_header_t *smaheader;
+
 	/*
 	 * Attach to an existing shared memory segment.
 	 * Skips all initialization - the SMA header and free list were set up
@@ -626,11 +630,22 @@ PHP_APCU_API void apc_sma_attach(
 	sma->initialized = 1;
 	sma->expunge = expunge;
 	sma->data = data;
-	sma->size = ALIGNWORD(size);
 	sma->shmaddr = addr;
 
-	/* Read max_alloc_size from the shared header (set by the creating process) */
-	sma_header_t *smaheader = sma->shmaddr;
+	/* Read the actual segment size from the shared header rather than
+	 * trusting the caller's apc.shm_size INI value. CreateFileMapping
+	 * ignores the requested size when opening an existing mapping, so
+	 * a size mismatch would make the allocator walk blocks past the
+	 * mapped view boundary. */
+	smaheader = SMA_HDR(sma);
+	if (smaheader->seg_size > 0) {
+		sma->size = smaheader->seg_size;
+	} else {
+		/* Creator hasn't finished init yet. Use caller's size temporarily;
+		 * the init_complete check in php_apc.c will catch this case. */
+		sma->size = ALIGNWORD(size);
+	}
+
 	sma->max_alloc_size = smaheader->max_alloc_size;
 }
 
