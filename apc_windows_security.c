@@ -62,9 +62,12 @@ int apc_windows_build_dacl(SECURITY_ATTRIBUTES *sa, apc_windows_sd_t *sd_out)
 		return 0;
 	}
 
-	/* Build an ACE granting full access to the current user only */
+	/* Build an ACE granting read/write/sync access to the current user only.
+	 * Use FILE_MAP_ALL_ACCESS (= SECTION_MAP_READ|WRITE|EXECUTE|EXTEND|QUERY)
+	 * plus SYNCHRONIZE for mutexes. Avoid SECTION_ALL_ACCESS which includes
+	 * WRITE_DAC and WRITE_OWNER — unnecessary and violates least privilege. */
 	memset(&ea, 0, sizeof(ea));
-	ea.grfAccessPermissions = FILE_MAP_ALL_ACCESS | SECTION_ALL_ACCESS;
+	ea.grfAccessPermissions = FILE_MAP_ALL_ACCESS | SYNCHRONIZE;
 	ea.grfAccessMode = SET_ACCESS;
 	ea.grfInheritance = NO_INHERITANCE;
 	ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;

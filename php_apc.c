@@ -330,11 +330,12 @@ static PHP_MINIT_FUNCTION(apcu)
 					/* Wait for the creating process to finish init.
 					 * This should be near-instant since we hold the init mutex,
 					 * but guards against edge cases where the creator crashed
-					 * between CreateFileMapping and setting init_complete. */
+					 * between CreateFileMapping and setting init_complete.
+					 * Use wall-clock timeout (30s) instead of spin count. */
 					{
-						int wait_spins = 0;
+						ULONGLONG wait_start = GetTickCount64();
 						while (!apc_sma_is_init_complete(&apc_sma)) {
-							if (++wait_spins > 100000) {
+							if (GetTickCount64() - wait_start > 30000) {
 								apc_windows_shm_init_unlock(init_lock);
 								apc_windows_shm_detach(shm);
 								zend_error_noreturn(E_CORE_ERROR,

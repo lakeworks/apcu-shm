@@ -46,6 +46,9 @@ HANDLE apc_windows_shm_init_lock(const char *shm_name)
 {
 	char mutex_name[256];
 	HANDLE mutex;
+	SECURITY_ATTRIBUTES sa;
+	SECURITY_ATTRIBUTES *psa = NULL;
+	apc_windows_sd_t sd_info = {0};
 
 	if (!apc_windows_shm_validate_name(shm_name)) {
 		zend_error_noreturn(E_CORE_ERROR,
@@ -56,7 +59,15 @@ HANDLE apc_windows_shm_init_lock(const char *shm_name)
 
 	snprintf(mutex_name, sizeof(mutex_name), "Local\\APCu_%s_init", shm_name);
 
-	mutex = CreateMutexA(NULL, FALSE, mutex_name);
+	/* Apply the same DACL to the mutex as to the shared memory segment,
+	 * preventing name-squatting attacks from other processes in the same
+	 * logon session. */
+	if (apc_windows_build_dacl(&sa, &sd_info)) {
+		psa = &sa;
+	}
+
+	mutex = CreateMutexA(psa, FALSE, mutex_name);
+	apc_windows_free_dacl(&sd_info);
 	if (!mutex) {
 		zend_error_noreturn(E_CORE_ERROR,
 			"apc_windows_shm_init_lock: CreateMutex(%s) failed: %lu",

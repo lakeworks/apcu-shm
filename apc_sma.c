@@ -624,14 +624,26 @@ PHP_APCU_API void apc_sma_attach(
 	 * mapped view boundary. */
 	smaheader = SMA_HDR(sma);
 	if (smaheader->seg_size > 0) {
-		sma->size = smaheader->seg_size;
+		/* Sanity check: seg_size must be at least large enough for the header
+		 * plus three block_t structs (sentinel, one free block, end sentinel).
+		 * A corrupted or maliciously pre-created segment could have nonsensical
+		 * values that would cause the allocator to walk past the mapped view. */
+		size_t min_viable = ALIGNWORD(sizeof(sma_header_t)) + 3 * ALIGNWORD(sizeof(block_t));
+		if (smaheader->seg_size < min_viable || smaheader->seg_size > (size_t)1 << 40) {
+			apc_warning("apc_sma_attach: shared header seg_size=%zu is invalid (min=%zu), using caller's size",
+				smaheader->seg_size, min_viable);
+			sma->size = ALIGNWORD(size);
+		} else {
+			sma->size = smaheader->seg_size;
+		}
 	} else {
 		/* Creator hasn't finished init yet. Use caller's size temporarily;
 		 * the init_complete check in php_apc.c will catch this case. */
 		sma->size = ALIGNWORD(size);
 	}
 
-	sma->max_alloc_size = smaheader->max_alloc_size;
+	sma->max_alloc_size = (smaheader->max_alloc_size > 0 && smaheader->max_alloc_size < sma->size)
+		? smaheader->max_alloc_size : 0;
 }
 
 PHP_APCU_API void apc_sma_set_cache_info(apc_sma_t *sma, size_t cache_header_offset, size_t nslots) {
