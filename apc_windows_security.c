@@ -16,7 +16,7 @@
 #ifdef PHP_WIN32
 
 #include "apc_windows_security.h"
-#include "apc.h"
+#include <aclapi.h>
 
 int apc_windows_build_dacl(SECURITY_ATTRIBUTES *sa, apc_windows_sd_t *sd_out)
 {

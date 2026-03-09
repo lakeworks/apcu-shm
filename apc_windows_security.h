@@ -18,8 +18,7 @@
 
 #ifdef PHP_WIN32
 
-#include <windows.h>
-#include <aclapi.h>
+#include "apc.h"
 
 /*
  * Wrapper holding both the security descriptor and DACL pointers,

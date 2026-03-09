@@ -19,7 +19,6 @@
 #ifdef PHP_WIN32
 
 #include "apc.h"
-#include <windows.h>
 
 typedef struct _apc_windows_shm_t {
 	HANDLE mapping_handle;    /* handle to the file mapping object */

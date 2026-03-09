@@ -17,7 +17,6 @@
 
 #include "apc_windows_shm.h"
 #include "apc_windows_security.h"
-#include "apc.h"
 
 /* Maximum shm_name length to prevent buffer overflow in name formatting.
  * Names are formatted as "Local\APCu_{name}_init" (longest suffix), so
