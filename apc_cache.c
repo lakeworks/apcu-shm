@@ -356,8 +356,55 @@ PHP_APCU_API apc_cache_t* apc_cache_create(apc_sma_t* sma, apc_serializer_t* ser
 	/* header lock */
 	CREATE_LOCK(&cache->header->lock);
 
+#ifdef PHP_WIN32
+	/* Store nslots in the shared header for future cross-process attach */
+	cache->header->nslots = nslots;
+#endif
+
 	return cache;
 }
+
+#ifdef PHP_WIN32
+PHP_APCU_API apc_cache_t* apc_cache_attach(
+		apc_sma_t* sma, apc_serializer_t* serializer,
+		zend_long gc_ttl, zend_long ttl, zend_long smart, zend_bool defend) {
+	apc_cache_t* cache;
+	size_t cache_header_offset;
+	size_t nslots;
+
+	/* Retrieve the cache layout info stored by the creating process */
+	cache_header_offset = apc_sma_get_cache_offset(sma);
+	nslots = apc_sma_get_cache_nslots(sma);
+
+	if (cache_header_offset == 0 || nslots == 0) {
+		apc_error("apc_cache_attach: invalid cache layout in shared memory (offset=%zu, nslots=%zu)",
+			cache_header_offset, nslots);
+		return NULL;
+	}
+
+	/* Allocate per-process descriptor (NOT in shared memory) */
+	cache = pemalloc(sizeof(apc_cache_t), 1);
+
+	/* Point to the existing header in shared memory */
+	cache->header = (apc_cache_header_t *)((char *)sma->shmaddr + cache_header_offset);
+
+	/* Slots array immediately follows the header */
+	cache->slots = (uintptr_t *)((uintptr_t)cache->header + sizeof(apc_cache_header_t));
+
+	/* Set per-process fields */
+	cache->sma = sma;
+	cache->serializer = serializer;
+	cache->nslots = nslots;
+	cache->gc_ttl = gc_ttl;
+	cache->ttl = ttl;
+	cache->smart = smart;
+	cache->defend = defend;
+
+	/* Do NOT initialize the header or create locks - they already exist */
+
+	return cache;
+}
+#endif /* PHP_WIN32 */
 
 static inline zend_bool apc_cache_wlocked_insert(
 		apc_cache_t *cache, apc_cache_entry_t *new_entry, zend_bool exclusive) {

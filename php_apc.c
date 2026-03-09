@@ -62,6 +62,10 @@
 #include "apc_signal.h"
 #endif
 
+#ifdef PHP_WIN32
+#include "apc_windows_shm.h"
+#endif
+
 ZEND_DECLARE_MODULE_GLOBALS(apcu)
 
 /* True globals */
@@ -156,6 +160,9 @@ STD_PHP_INI_ENTRY("apc.preload_path", (char*)NULL,              PHP_INI_SYSTEM, 
 STD_PHP_INI_BOOLEAN("apc.coredump_unmap", "0", PHP_INI_SYSTEM, OnUpdateBool, coredump_unmap, zend_apcu_globals, apcu_globals)
 STD_PHP_INI_BOOLEAN("apc.use_request_time", "0", PHP_INI_ALL, OnUpdateBool, use_request_time,  zend_apcu_globals, apcu_globals)
 STD_PHP_INI_ENTRY("apc.serializer", "php", PHP_INI_SYSTEM, OnUpdateStringUnempty, serializer_name, zend_apcu_globals, apcu_globals)
+#ifdef PHP_WIN32
+STD_PHP_INI_ENTRY("apc.shm_name", "", PHP_INI_SYSTEM, OnUpdateString, shm_name, zend_apcu_globals, apcu_globals)
+#endif
 PHP_INI_END()
 
 zend_bool apc_is_enabled(void)
@@ -178,6 +185,13 @@ static PHP_MINFO_FUNCTION(apcu)
 	php_info_print_table_row(2, "MMAP File Mask", APCG(mmap_file_mask));
 #else
 	php_info_print_table_row(2, "MMAP Support", "Disabled");
+#endif
+#ifdef PHP_WIN32
+	php_info_print_table_row(2, "Shared Memory",
+		(APCG(shm_name) && APCG(shm_name)[0]) ? "Named (cross-process)" : "Per-process");
+	if (APCG(shm_name) && APCG(shm_name)[0]) {
+		php_info_print_table_row(2, "SHM Name", APCG(shm_name));
+	}
 #endif
 
 	if (APCG(enabled)) {
@@ -249,11 +263,6 @@ static PHP_MINIT_FUNCTION(apcu)
 			/* ensure this runs only once */
 			APCG(initialized) = 1;
 
-			/* initialize shared memory allocator */
-			apc_sma_init(
-				&apc_sma, (void **) &apc_user_cache, (apc_sma_expunge_f) apc_cache_default_expunge,
-				APCG(shm_size), APC_ENTRY_SIZE(0), mmap_file_mask, mmap_hugepage_size);
-
 			REGISTER_LONG_CONSTANT(APC_SERIALIZER_CONSTANT, (zend_long)&_apc_register_serializer, CONST_PERSISTENT | CONST_CS);
 
 			/* register default serializer */
@@ -263,11 +272,75 @@ static PHP_MINIT_FUNCTION(apcu)
 			/* test out the constant function pointer */
 			assert(apc_get_serializers()->name != NULL);
 
-			/* create user cache */
-			apc_user_cache = apc_cache_create(
-				&apc_sma,
-				apc_find_serializer(APCG(serializer_name)),
-				APCG(entries_hint), APCG(gc_ttl), APCG(ttl), APCG(smart), APCG(slam_defense));
+#ifdef PHP_WIN32
+			if (APCG(shm_name) && APCG(shm_name)[0]) {
+				/* ====== Named shared memory path (cross-process) ====== */
+				HANDLE init_lock;
+				apc_windows_shm_t *shm;
+				size_t shm_size = ALIGNWORD(APCG(shm_size) > 0 ? APCG(shm_size) : (30*1024*1024));
+
+				/* Acquire init mutex to serialize first-time setup */
+				init_lock = apc_windows_shm_init_lock(APCG(shm_name));
+
+				/* Create or attach to named shared memory segment */
+				shm = apc_windows_shm_create(APCG(shm_name), shm_size);
+				if (!shm) {
+					apc_windows_shm_init_unlock(init_lock);
+					zend_error_noreturn(E_CORE_ERROR,
+						"APCu: Failed to create named shared memory segment '%s' (%zu bytes)",
+						APCG(shm_name), shm_size);
+				}
+
+				if (shm->is_new) {
+					/* First process: full initialization */
+					apc_sma_init_from_addr(
+						&apc_sma, (void **) &apc_user_cache,
+						(apc_sma_expunge_f) apc_cache_default_expunge,
+						shm->addr, shm_size, APC_ENTRY_SIZE(0));
+
+					apc_user_cache = apc_cache_create(
+						&apc_sma,
+						apc_find_serializer(APCG(serializer_name)),
+						APCG(entries_hint), APCG(gc_ttl), APCG(ttl),
+						APCG(smart), APCG(slam_defense));
+
+					/* Store layout info for future attaching processes */
+					apc_sma_set_cache_info(&apc_sma,
+						(size_t)((char *)apc_user_cache->header - (char *)apc_sma.shmaddr),
+						apc_user_cache->nslots);
+				} else {
+					/* Attaching to existing segment: skip initialization */
+					apc_sma_attach(
+						&apc_sma, (void **) &apc_user_cache,
+						(apc_sma_expunge_f) apc_cache_default_expunge,
+						shm->addr, shm_size);
+
+					apc_user_cache = apc_cache_attach(
+						&apc_sma,
+						apc_find_serializer(APCG(serializer_name)),
+						APCG(gc_ttl), APCG(ttl), APCG(smart), APCG(slam_defense));
+				}
+
+				/* Store the shm handle for cleanup on MSHUTDOWN */
+				apc_sma.win_shm = shm;
+				apc_sma.is_new_segment = shm->is_new;
+
+				apc_windows_shm_init_unlock(init_lock);
+			} else
+#endif /* PHP_WIN32 */
+			{
+				/* ====== Standard path (per-process or POSIX shared) ====== */
+				apc_sma_init(
+					&apc_sma, (void **) &apc_user_cache,
+					(apc_sma_expunge_f) apc_cache_default_expunge,
+					APCG(shm_size), APC_ENTRY_SIZE(0), mmap_file_mask, mmap_hugepage_size);
+
+				apc_user_cache = apc_cache_create(
+					&apc_sma,
+					apc_find_serializer(APCG(serializer_name)),
+					APCG(entries_hint), APCG(gc_ttl), APCG(ttl),
+					APCG(smart), APCG(slam_defense));
+			}
 
 			/* preload data from path specified in configuration */
 			if (APCG(preload_path)) {

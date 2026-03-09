@@ -60,6 +60,10 @@ ZEND_BEGIN_MODULE_GLOBALS(apcu)
 
 	char *serializer_name;       /* the serializer config option */
 
+#ifdef PHP_WIN32
+	char *shm_name;              /* named shared memory segment identifier */
+#endif
+
 	/* Nesting level of apcu_entry calls. */
 	unsigned int entry_level;
 ZEND_END_MODULE_GLOBALS(apcu)

@@ -76,6 +76,9 @@ typedef struct _apc_cache_header_t {
 	time_t stime;                   /* start time */
 	apc_cache_slam_key_t lastkey;   /* last key inserted (not necessarily without error) */
 	uintptr_t gc;                   /* offset in shm to the first entry of gc list */
+#ifdef PHP_WIN32
+	size_t nslots;                  /* number of hash slots (stored for cross-process attach) */
+#endif
 } apc_cache_header_t;
 
 typedef struct _apc_cache_t {
@@ -123,6 +126,19 @@ typedef zend_bool (*apc_cache_atomic_updater_t)(apc_cache_t*, zend_long*, void* 
 PHP_APCU_API apc_cache_t* apc_cache_create(
         apc_sma_t* sma, apc_serializer_t* serializer, zend_long size_hint,
         zend_long gc_ttl, zend_long ttl, zend_long smart, zend_bool defend);
+
+#ifdef PHP_WIN32
+/*
+ * apc_cache_attach wraps an existing cache header (in shared memory) with
+ * a per-process apc_cache_t descriptor. Used when attaching to a named
+ * shared memory segment that was already initialized by another process.
+ *
+ * The cache header must already be at sma->shmaddr + cache_header_offset.
+ */
+PHP_APCU_API apc_cache_t* apc_cache_attach(
+        apc_sma_t* sma, apc_serializer_t* serializer,
+        zend_long gc_ttl, zend_long ttl, zend_long smart, zend_bool defend);
+#endif
 
 /*
 * apc_cache_preload preloads the data at path into the specified cache

@@ -2,7 +2,7 @@
   +----------------------------------------------------------------------+
   | APCu - Windows Security (DACL for app pool isolation)                |
   +----------------------------------------------------------------------+
-  | Copyright (c) 2024 Lakeworks                                         |
+  | Copyright (c) 2026 Lakeworks                                         |
   +----------------------------------------------------------------------+
   | This source file is subject to version 3.01 of the PHP license,      |
   | that is bundled with this package in the file LICENSE, and is        |

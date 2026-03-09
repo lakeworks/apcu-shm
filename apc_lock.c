@@ -26,6 +26,23 @@
  */
 
 #ifdef PHP_WIN32
+
+/*
+ * Cross-process atomics-based rwlock for Windows.
+ *
+ * The lock struct (apc_lock_t) lives IN the shared memory segment, so
+ * multiple php-cgi.exe processes can synchronize via Interlocked* operations.
+ *
+ * Read lock:  multiple concurrent readers allowed
+ * Write lock: exclusive, with crash recovery via PID tracking
+ *
+ * Spin strategy: brief YieldProcessor(), then SwitchToThread() for longer waits.
+ */
+
+/* Maximum spin iterations before checking for dead writer or forcing reset */
+#define APC_LOCK_SPIN_YIELD     64
+#define APC_LOCK_SPIN_MAX       2000000
+
 PHP_APCU_API zend_bool apc_lock_init() {
 	return 1;
 }
@@ -34,31 +51,119 @@ PHP_APCU_API void apc_lock_cleanup() {
 }
 
 PHP_APCU_API zend_bool apc_lock_create(apc_lock_t *lock) {
-	return NULL != apc_windows_cs_create(lock);
+	lock->readers = 0;
+	lock->writer = 0;
+	lock->writer_pid = 0;
+	return 1;
 }
 
 static inline zend_bool apc_lock_rlock_impl(apc_lock_t *lock) {
-	apc_windows_cs_rdlock(lock);
-	return 1;
+	int spins = 0;
+	for (;;) {
+		/* Wait until no writer is active */
+		while (lock->writer) {
+			if (++spins < APC_LOCK_SPIN_YIELD) {
+				YieldProcessor();
+			} else {
+				SwitchToThread();
+			}
+		}
+
+		/* Increment reader count */
+		InterlockedIncrement(&lock->readers);
+
+		/* Double-check: if a writer snuck in, back off and retry */
+		if (!lock->writer) {
+			return 1;
+		}
+
+		InterlockedDecrement(&lock->readers);
+	}
 }
 
 static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
-	apc_windows_cs_lock(lock);
-	return 1;
+	DWORD my_pid = GetCurrentProcessId();
+	int spins = 0;
+
+	for (;;) {
+		/* Try to acquire the writer flag */
+		if (InterlockedCompareExchange(&lock->writer, 1, 0) == 0) {
+			/* We are the writer */
+			lock->writer_pid = my_pid;
+
+			/* Wait for all readers to drain */
+			while (lock->readers) {
+				if (++spins < APC_LOCK_SPIN_YIELD) {
+					YieldProcessor();
+				} else {
+					SwitchToThread();
+				}
+
+				/* Safety: if readers are stuck for too long, force-reset.
+				 * This handles the case where a reader process died. */
+				if (spins > APC_LOCK_SPIN_MAX) {
+					InterlockedExchange(&lock->readers, 0);
+					break;
+				}
+			}
+			return 1;
+		}
+
+		/* Another writer holds the lock. Check if it's a dead process. */
+		if (++spins > APC_LOCK_SPIN_YIELD) {
+			DWORD holder_pid = lock->writer_pid;
+			if (holder_pid != 0 && holder_pid != my_pid) {
+				HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, holder_pid);
+				if (!hProc) {
+					/* Process doesn't exist anymore - force-reset the lock */
+					InterlockedExchange(&lock->writer, 0);
+					lock->writer_pid = 0;
+					spins = 0;
+					continue;
+				} else {
+					DWORD exit_code;
+					if (GetExitCodeProcess(hProc, &exit_code) && exit_code != STILL_ACTIVE) {
+						CloseHandle(hProc);
+						InterlockedExchange(&lock->writer, 0);
+						lock->writer_pid = 0;
+						spins = 0;
+						continue;
+					}
+					CloseHandle(hProc);
+				}
+			}
+		}
+
+		/* Force-reset after excessive spinning (guards against PID reuse edge case) */
+		if (spins > APC_LOCK_SPIN_MAX) {
+			InterlockedExchange(&lock->writer, 0);
+			lock->writer_pid = 0;
+			spins = 0;
+			continue;
+		}
+
+		if (spins < APC_LOCK_SPIN_YIELD) {
+			YieldProcessor();
+		} else {
+			SwitchToThread();
+		}
+	}
 }
 
 PHP_APCU_API zend_bool apc_lock_wunlock(apc_lock_t *lock) {
-	apc_windows_cs_unlock_wr(lock);
+	lock->writer_pid = 0;
+	MemoryBarrier();
+	InterlockedExchange(&lock->writer, 0);
 	return 1;
 }
 
 PHP_APCU_API zend_bool apc_lock_runlock(apc_lock_t *lock) {
-	apc_windows_cs_unlock_rd(lock);
+	InterlockedDecrement(&lock->readers);
 	return 1;
 }
 
 PHP_APCU_API void apc_lock_destroy(apc_lock_t *lock) {
-	apc_windows_cs_destroy(lock);
+	/* Nothing to destroy - atomics don't need cleanup */
 }
 
 #elif defined(APC_NATIVE_RWLOCK)

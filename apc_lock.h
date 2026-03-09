@@ -59,9 +59,17 @@ typedef struct {
 } apc_lock_t;
 # endif
 #else
-/* XXX kernel lock mode only for now, compatible through all the wins, add more ifdefs for others */
-# include "apc_windows_srwlock_kernel.h"
-typedef apc_windows_cs_rwlock_t apc_lock_t;
+/*
+ * Cross-process shared-memory rwlock for Windows.
+ * Uses Interlocked* atomics stored IN the shared memory segment,
+ * so multiple php-cgi.exe processes sharing a named file mapping
+ * can synchronize. Includes crash recovery via PID tracking.
+ */
+typedef struct {
+	volatile LONG readers;      /* atomic reader count */
+	volatile LONG writer;       /* 0 = no writer, 1 = writer active */
+	volatile DWORD writer_pid;  /* PID of writer (for crash detection) */
+} apc_lock_t;
 # define APC_LOCK_SHARED
 #endif
 

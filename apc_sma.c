@@ -36,6 +36,10 @@
 #include <limits.h>
 #include "apc_mmap.h"
 
+#ifdef PHP_WIN32
+#include "apc_windows_shm.h"
+#endif
+
 #ifdef APC_SMA_DEBUG
 # ifdef HAVE_VALGRIND_MEMCHECK_H
 #  include <valgrind/memcheck.h>
@@ -48,6 +52,10 @@ struct sma_header_t {
 	apc_mutex_t sma_lock;   /* segment lock */
 	size_t min_block_size;  /* expected minimum size of allocated blocks */
 	size_t avail;           /* bytes available (not necessarily contiguous) */
+#ifdef PHP_WIN32
+	size_t cache_header_offset;  /* offset of apc_cache_header_t from segment base */
+	size_t nslots;               /* number of cache hash slots */
+#endif
 };
 
 #define SMA_DEFAULT_SEGSIZE (30*1024*1024)
@@ -305,6 +313,15 @@ PHP_APCU_API void apc_sma_detach(apc_sma_t* sma) {
 	assert(sma->initialized);
 	sma->initialized = 0;
 
+#ifdef PHP_WIN32
+	if (sma->win_shm) {
+		apc_windows_shm_detach((apc_windows_shm_t *)sma->win_shm);
+		sma->win_shm = NULL;
+		sma->shmaddr = NULL;
+		return;
+	}
+#endif
+
 #ifdef APC_MMAP
 	apc_unmap(sma->shmaddr, sma->size);
 #else
@@ -537,6 +554,93 @@ PHP_APCU_API void apc_sma_defrag(apc_sma_t *sma, void *data, apc_sma_move_f move
 
 	SMA_UNLOCK(sma);
 }
+
+#ifdef PHP_WIN32
+PHP_APCU_API void apc_sma_init_from_addr(
+		apc_sma_t* sma, void** data, apc_sma_expunge_f expunge,
+		void *addr, size_t size, size_t min_alloc_size) {
+	/*
+	 * Initialize the SMA using a pre-allocated shared memory address.
+	 * This is used when the current process CREATED a new named shared memory segment.
+	 * Performs full initialization of the SMA header and free list.
+	 */
+	if (sma->initialized) {
+		return;
+	}
+
+	sma->initialized = 1;
+	sma->expunge = expunge;
+	sma->data = data;
+	sma->size = ALIGNWORD(size);
+	sma->shmaddr = addr;
+
+	sma_header_t *smaheader = sma->shmaddr;
+	SMA_CREATE_LOCK(&smaheader->sma_lock);
+	smaheader->min_block_size = min_alloc_size > 0 ? ALIGNWORD(min_alloc_size + ALIGNWORD(sizeof(block_t))) : MINBLOCKSIZE;
+	smaheader->avail = sma->size - ALIGNWORD(sizeof(sma_header_t)) - ALIGNWORD(sizeof(block_t)) - ALIGNWORD(sizeof(block_t));
+	sma->max_alloc_size = smaheader->avail - ALIGNWORD(sizeof(block_t));
+	smaheader->cache_header_offset = 0;
+	smaheader->nslots = 0;
+
+	block_t *first = BLOCKAT(ALIGNWORD(sizeof(sma_header_t)));
+	first->size = 0;
+	first->fnext = ALIGNWORD(sizeof(sma_header_t)) + ALIGNWORD(sizeof(block_t));
+	first->fprev = 0;
+	first->prev_size = 0;
+	SET_CANARY(first);
+
+	block_t *empty = BLOCKAT(first->fnext);
+	empty->size = smaheader->avail;
+	empty->fnext = OFFSET(empty) + empty->size;
+	empty->fprev = ALIGNWORD(sizeof(sma_header_t));
+	empty->prev_size = 0;
+	SET_CANARY(empty);
+
+	block_t *last = BLOCKAT(empty->fnext);
+	last->size = 0;
+	last->fnext = 0;
+	last->fprev = OFFSET(empty);
+	last->prev_size = empty->size;
+	SET_CANARY(last);
+}
+
+PHP_APCU_API void apc_sma_attach(
+		apc_sma_t* sma, void** data, apc_sma_expunge_f expunge,
+		void *addr, size_t size) {
+	/*
+	 * Attach to an existing shared memory segment.
+	 * Skips all initialization - the SMA header and free list were set up
+	 * by the first process that created this segment.
+	 */
+	if (sma->initialized) {
+		return;
+	}
+
+	sma->initialized = 1;
+	sma->expunge = expunge;
+	sma->data = data;
+	sma->size = ALIGNWORD(size);
+	sma->shmaddr = addr;
+
+	/* Read max_alloc_size from the existing header */
+	sma_header_t *smaheader = sma->shmaddr;
+	sma->max_alloc_size = sma->size - ALIGNWORD(sizeof(sma_header_t)) - ALIGNWORD(sizeof(block_t)) - ALIGNWORD(sizeof(block_t)) - ALIGNWORD(sizeof(block_t));
+}
+
+PHP_APCU_API void apc_sma_set_cache_info(apc_sma_t *sma, size_t cache_header_offset, size_t nslots) {
+	sma_header_t *smaheader = SMA_HDR(sma);
+	smaheader->cache_header_offset = cache_header_offset;
+	smaheader->nslots = nslots;
+}
+
+PHP_APCU_API size_t apc_sma_get_cache_offset(apc_sma_t *sma) {
+	return SMA_HDR(sma)->cache_header_offset;
+}
+
+PHP_APCU_API size_t apc_sma_get_cache_nslots(apc_sma_t *sma) {
+	return SMA_HDR(sma)->nslots;
+}
+#endif /* PHP_WIN32 */
 
 /*
  * Local variables:

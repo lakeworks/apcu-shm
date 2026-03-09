@@ -62,6 +62,11 @@ typedef struct _apc_sma_t {
 	size_t size;                   /* segment size */
 	size_t max_alloc_size;         /* max size of memory available for allocation */
 	void  *shmaddr;                /* address of shm segment */
+
+#ifdef PHP_WIN32
+	void *win_shm;                 /* pointer to apc_windows_shm_t (named shm handle) */
+	zend_bool is_new_segment;      /* TRUE if this process created the segment */
+#endif
 } apc_sma_t;
 
 /*
@@ -128,6 +133,36 @@ PHP_APCU_API zend_bool apc_sma_check_avail_contiguous(apc_sma_t *sma, size_t siz
 */
 typedef zend_bool (*apc_sma_move_f)(void *data, void *pointer_old, void *pointer_new);
 PHP_APCU_API void apc_sma_defrag(apc_sma_t *sma, void *data, apc_sma_move_f move);
+
+#ifdef PHP_WIN32
+/*
+ * apc_sma_init_from_addr initializes the SMA using a pre-allocated shared memory address.
+ * Used when the process created a new named shared memory segment.
+ * This initializes the free list and SMA header, same as apc_sma_init().
+ */
+PHP_APCU_API void apc_sma_init_from_addr(
+		apc_sma_t* sma, void** data, apc_sma_expunge_f expunge,
+		void *addr, size_t size, size_t min_alloc_size);
+
+/*
+ * apc_sma_attach sets up the SMA from an existing shared memory segment.
+ * Skips all initialization (free list, header) since another process already did it.
+ */
+PHP_APCU_API void apc_sma_attach(
+		apc_sma_t* sma, void** data, apc_sma_expunge_f expunge,
+		void *addr, size_t size);
+
+/*
+ * Store cache layout info in the SMA header (for future attaching processes).
+ */
+PHP_APCU_API void apc_sma_set_cache_info(apc_sma_t *sma, size_t cache_header_offset, size_t nslots);
+
+/*
+ * Retrieve cache layout info from the SMA header.
+ */
+PHP_APCU_API size_t apc_sma_get_cache_offset(apc_sma_t *sma);
+PHP_APCU_API size_t apc_sma_get_cache_nslots(apc_sma_t *sma);
+#endif
 
 /* ALIGNWORD: pad up x, aligned to the system's word boundary */
 #define ALIGNWORD(x) ZEND_MM_ALIGNED_SIZE(x)
