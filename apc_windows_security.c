@@ -18,7 +18,7 @@
 #include "apc_windows_security.h"
 #include "apc.h"
 
-int apc_windows_build_dacl(SECURITY_ATTRIBUTES *sa)
+int apc_windows_build_dacl(SECURITY_ATTRIBUTES *sa, apc_windows_sd_t *sd_out)
 {
 	HANDLE token = NULL;
 	TOKEN_USER *user = NULL;
@@ -28,9 +28,12 @@ int apc_windows_build_dacl(SECURITY_ATTRIBUTES *sa)
 	EXPLICIT_ACCESS_A ea;
 	DWORD result;
 
-	if (!sa) {
+	if (!sa || !sd_out) {
 		return 0;
 	}
+
+	sd_out->sd = NULL;
+	sd_out->dacl = NULL;
 
 	/* Get the current process token */
 	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
@@ -106,36 +109,31 @@ int apc_windows_build_dacl(SECURITY_ATTRIBUTES *sa)
 	sa->lpSecurityDescriptor = sd;
 	sa->bInheritHandle = FALSE;
 
+	/* Track both pointers for safe cleanup */
+	sd_out->sd = sd;
+	sd_out->dacl = dacl;
+
 	free(user);
 	CloseHandle(token);
-
-	/* Note: dacl is embedded in sd via SetSecurityDescriptorDacl,
-	 * but we need to keep the pointer to free it later.
-	 * Store it in a known location: right after the SD in the same allocation.
-	 * Actually, we just rely on the caller to call apc_windows_free_dacl(). */
 
 	return 1;
 }
 
-void apc_windows_free_dacl(SECURITY_ATTRIBUTES *sa)
+void apc_windows_free_dacl(apc_windows_sd_t *sd_info)
 {
-	if (!sa || !sa->lpSecurityDescriptor) {
+	if (!sd_info) {
 		return;
 	}
 
-	/* Extract the DACL from the security descriptor before freeing */
-	PACL dacl = NULL;
-	BOOL dacl_present = FALSE;
-	BOOL dacl_defaulted = FALSE;
-
-	if (GetSecurityDescriptorDacl(sa->lpSecurityDescriptor, &dacl_present, &dacl, &dacl_defaulted)) {
-		if (dacl_present && dacl) {
-			LocalFree(dacl);
-		}
+	if (sd_info->dacl) {
+		LocalFree(sd_info->dacl);
+		sd_info->dacl = NULL;
 	}
 
-	LocalFree(sa->lpSecurityDescriptor);
-	sa->lpSecurityDescriptor = NULL;
+	if (sd_info->sd) {
+		LocalFree(sd_info->sd);
+		sd_info->sd = NULL;
+	}
 }
 
 #endif /* PHP_WIN32 */

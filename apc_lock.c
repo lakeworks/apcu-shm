@@ -72,6 +72,11 @@ static inline zend_bool apc_lock_rlock_impl(apc_lock_t *lock) {
 		/* Increment reader count */
 		InterlockedIncrement(&lock->readers);
 
+		/* Acquire barrier: ensure we see the writer's data modifications
+		 * before proceeding. InterlockedIncrement provides acquire semantics
+		 * on x86/x64, but we add an explicit barrier for correctness. */
+		MemoryBarrier();
+
 		/* Double-check: if a writer snuck in, back off and retry */
 		if (!lock->writer) {
 			return 1;
@@ -106,6 +111,9 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 					break;
 				}
 			}
+			/* Acquire barrier: ensure we see all prior writes from
+			 * other processes before we start modifying shared data. */
+			MemoryBarrier();
 			return 1;
 		}
 
@@ -151,8 +159,14 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 }
 
 PHP_APCU_API zend_bool apc_lock_wunlock(apc_lock_t *lock) {
-	lock->writer_pid = 0;
+	/* Release barrier: ensure all data writes performed under the write lock
+	 * are visible to other processors BEFORE we clear the writer flag.
+	 * This is critical for cross-process correctness. */
 	MemoryBarrier();
+	lock->writer_pid = 0;
+	/* InterlockedExchange has full barrier semantics on x86/x64,
+	 * ensuring the writer_pid=0 and all prior stores are visible
+	 * before the writer flag is cleared. */
 	InterlockedExchange(&lock->writer, 0);
 	return 1;
 }

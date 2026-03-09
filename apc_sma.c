@@ -55,6 +55,8 @@ struct sma_header_t {
 #ifdef PHP_WIN32
 	size_t cache_header_offset;  /* offset of apc_cache_header_t from segment base */
 	size_t nslots;               /* number of cache hash slots */
+	size_t max_alloc_size;       /* max allocatable size (for attaching processes) */
+	volatile LONG init_complete; /* 1 when all shared structures are fully initialized */
 #endif
 };
 
@@ -581,6 +583,8 @@ PHP_APCU_API void apc_sma_init_from_addr(
 	sma->max_alloc_size = smaheader->avail - ALIGNWORD(sizeof(block_t));
 	smaheader->cache_header_offset = 0;
 	smaheader->nslots = 0;
+	smaheader->max_alloc_size = sma->max_alloc_size;
+	smaheader->init_complete = 0;
 
 	block_t *first = BLOCKAT(ALIGNWORD(sizeof(sma_header_t)));
 	first->size = 0;
@@ -622,15 +626,19 @@ PHP_APCU_API void apc_sma_attach(
 	sma->size = ALIGNWORD(size);
 	sma->shmaddr = addr;
 
-	/* Read max_alloc_size from the existing header */
+	/* Read max_alloc_size from the shared header (set by the creating process) */
 	sma_header_t *smaheader = sma->shmaddr;
-	sma->max_alloc_size = sma->size - ALIGNWORD(sizeof(sma_header_t)) - ALIGNWORD(sizeof(block_t)) - ALIGNWORD(sizeof(block_t)) - ALIGNWORD(sizeof(block_t));
+	sma->max_alloc_size = smaheader->max_alloc_size;
 }
 
 PHP_APCU_API void apc_sma_set_cache_info(apc_sma_t *sma, size_t cache_header_offset, size_t nslots) {
 	sma_header_t *smaheader = SMA_HDR(sma);
 	smaheader->cache_header_offset = cache_header_offset;
 	smaheader->nslots = nslots;
+	/* Full memory barrier + set completion flag LAST so attaching processes
+	 * see consistent cache_header_offset and nslots values. */
+	MemoryBarrier();
+	InterlockedExchange(&smaheader->init_complete, 1);
 }
 
 PHP_APCU_API size_t apc_sma_get_cache_offset(apc_sma_t *sma) {
@@ -639,6 +647,15 @@ PHP_APCU_API size_t apc_sma_get_cache_offset(apc_sma_t *sma) {
 
 PHP_APCU_API size_t apc_sma_get_cache_nslots(apc_sma_t *sma) {
 	return SMA_HDR(sma)->nslots;
+}
+
+PHP_APCU_API zend_bool apc_sma_is_init_complete(apc_sma_t *sma) {
+	sma_header_t *smaheader = SMA_HDR(sma);
+	/* Read the flag with acquire semantics to ensure we see all
+	 * prior writes (cache_header_offset, nslots, etc.) */
+	LONG val = InterlockedCompareExchange(&smaheader->init_complete, 0, 0);
+	MemoryBarrier();
+	return val == 1;
 }
 #endif /* PHP_WIN32 */
 

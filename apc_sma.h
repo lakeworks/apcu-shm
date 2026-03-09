@@ -162,6 +162,12 @@ PHP_APCU_API void apc_sma_set_cache_info(apc_sma_t *sma, size_t cache_header_off
  */
 PHP_APCU_API size_t apc_sma_get_cache_offset(apc_sma_t *sma);
 PHP_APCU_API size_t apc_sma_get_cache_nslots(apc_sma_t *sma);
+
+/*
+ * Check if the creating process has finished initializing all shared structures.
+ * Attaching processes must poll this before reading cache layout info.
+ */
+PHP_APCU_API zend_bool apc_sma_is_init_complete(apc_sma_t *sma);
 #endif
 
 /* ALIGNWORD: pad up x, aligned to the system's word boundary */

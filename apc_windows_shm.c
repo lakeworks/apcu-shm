@@ -71,12 +71,13 @@ apc_windows_shm_t *apc_windows_shm_create(const char *shm_name, size_t size)
 	BOOL is_new;
 	SECURITY_ATTRIBUTES sa;
 	SECURITY_ATTRIBUTES *psa = NULL;
+	apc_windows_sd_t sd_info = {0};
 	DWORD size_high, size_low;
 
 	snprintf(mapping_name, sizeof(mapping_name), "Local\\APCu_%s_0", shm_name);
 
 	/* Build DACL for app pool isolation */
-	if (apc_windows_build_dacl(&sa)) {
+	if (apc_windows_build_dacl(&sa, &sd_info)) {
 		psa = &sa;
 	}
 
@@ -100,10 +101,8 @@ apc_windows_shm_t *apc_windows_shm_create(const char *shm_name, size_t size)
 
 	is_new = (GetLastError() != ERROR_ALREADY_EXISTS);
 
-	/* Free DACL resources regardless of success */
-	if (psa) {
-		apc_windows_free_dacl(psa);
-	}
+	/* Free DACL resources regardless of CreateFileMapping success */
+	apc_windows_free_dacl(&sd_info);
 
 	if (!mapping) {
 		apc_error("apc_windows_shm_create: CreateFileMapping(%s, %zu bytes) failed: %lu",

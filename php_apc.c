@@ -315,6 +315,24 @@ static PHP_MINIT_FUNCTION(apcu)
 						(apc_sma_expunge_f) apc_cache_default_expunge,
 						shm->addr, shm_size);
 
+					/* Wait for the creating process to finish init.
+					 * This should be near-instant since we hold the init mutex,
+					 * but guards against edge cases where the creator crashed
+					 * between CreateFileMapping and setting init_complete. */
+					{
+						int wait_spins = 0;
+						while (!apc_sma_is_init_complete(&apc_sma)) {
+							if (++wait_spins > 100000) {
+								apc_windows_shm_init_unlock(init_lock);
+								apc_windows_shm_detach(shm);
+								zend_error_noreturn(E_CORE_ERROR,
+									"APCu: Shared memory segment '%s' exists but initialization never completed (creator may have crashed)",
+									APCG(shm_name));
+							}
+							SwitchToThread();
+						}
+					}
+
 					apc_user_cache = apc_cache_attach(
 						&apc_sma,
 						apc_find_serializer(APCG(serializer_name)),
