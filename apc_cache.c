@@ -774,7 +774,7 @@ PHP_APCU_API void apc_cache_detach(apc_cache_t *cache)
 		return;
 	}
 
-	free(cache);
+	pefree(cache, 1);
 }
 
 static void apc_cache_wlocked_real_expunge(apc_cache_t* cache) {

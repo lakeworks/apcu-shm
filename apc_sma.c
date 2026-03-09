@@ -642,8 +642,15 @@ PHP_APCU_API void apc_sma_attach(
 		sma->size = ALIGNWORD(size);
 	}
 
-	sma->max_alloc_size = (smaheader->max_alloc_size > 0 && smaheader->max_alloc_size < sma->size)
-		? smaheader->max_alloc_size : 0;
+	/* Use the creator's max_alloc_size if valid, otherwise compute from
+	 * segment size (same formula as apc_sma_init_from_addr). A zero fallback
+	 * would cause every apc_sma_malloc to return NULL. */
+	if (smaheader->max_alloc_size > 0 && smaheader->max_alloc_size < sma->size) {
+		sma->max_alloc_size = smaheader->max_alloc_size;
+	} else {
+		sma->max_alloc_size = sma->size - ALIGNWORD(sizeof(sma_header_t))
+			- 3 * ALIGNWORD(sizeof(block_t));
+	}
 }
 
 PHP_APCU_API void apc_sma_set_cache_info(apc_sma_t *sma, size_t cache_header_offset, size_t nslots) {
