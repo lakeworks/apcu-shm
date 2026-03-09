@@ -41,6 +41,7 @@
 
 /* Maximum spin iterations before checking for dead writer or forcing reset */
 #define APC_LOCK_SPIN_YIELD     64
+#define APC_LOCK_SPIN_CRASH_CHECK 1024
 #define APC_LOCK_SPIN_MAX       2000000
 
 PHP_APCU_API zend_bool apc_lock_init() {
@@ -69,13 +70,11 @@ static inline zend_bool apc_lock_rlock_impl(apc_lock_t *lock) {
 			}
 		}
 
-		/* Increment reader count */
+		/* Increment reader count.
+		 * InterlockedIncrement has full barrier semantics on x86/x64,
+		 * providing the acquire ordering we need to see the writer's
+		 * data modifications before proceeding. */
 		InterlockedIncrement(&lock->readers);
-
-		/* Acquire barrier: ensure we see the writer's data modifications
-		 * before proceeding. InterlockedIncrement provides acquire semantics
-		 * on x86/x64, but we add an explicit barrier for correctness. */
-		MemoryBarrier();
 
 		/* Double-check: if a writer snuck in, back off and retry */
 		if (!lock->writer) {
@@ -117,8 +116,11 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 			return 1;
 		}
 
-		/* Another writer holds the lock. Check if it's a dead process. */
-		if (++spins > APC_LOCK_SPIN_YIELD) {
+		/* Another writer holds the lock. Periodically check if it's a dead process.
+		 * OpenProcess is an expensive syscall, so only check every 1024 spins
+		 * to avoid kernel overhead under contention. */
+		++spins;
+		if (spins >= APC_LOCK_SPIN_CRASH_CHECK && (spins & 0x3FF) == 0) {
 			DWORD holder_pid = lock->writer_pid;
 			if (holder_pid != 0 && holder_pid != my_pid) {
 				HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, holder_pid);

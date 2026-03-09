@@ -19,10 +19,22 @@
 #include "apc_windows_security.h"
 #include "apc.h"
 
+/* Maximum shm_name length to prevent buffer overflow in name formatting.
+ * Names are formatted as "Local\APCu_{name}_init" (longest suffix), so
+ * 200 chars leaves room for the ~20-char prefix/suffix in a 256-byte buffer. */
+#define APC_SHM_NAME_MAX 200
+
 HANDLE apc_windows_shm_init_lock(const char *shm_name)
 {
 	char mutex_name[256];
 	HANDLE mutex;
+
+	if (!shm_name || strlen(shm_name) > APC_SHM_NAME_MAX) {
+		zend_error_noreturn(E_CORE_ERROR,
+			"apc_windows_shm_init_lock: shm_name is NULL or exceeds %d characters",
+			APC_SHM_NAME_MAX);
+		return NULL;
+	}
 
 	snprintf(mutex_name, sizeof(mutex_name), "Local\\APCu_%s_init", shm_name);
 
@@ -73,6 +85,12 @@ apc_windows_shm_t *apc_windows_shm_create(const char *shm_name, size_t size)
 	SECURITY_ATTRIBUTES *psa = NULL;
 	apc_windows_sd_t sd_info = {0};
 	DWORD size_high, size_low;
+
+	if (!shm_name || strlen(shm_name) > APC_SHM_NAME_MAX) {
+		apc_error("apc_windows_shm_create: shm_name is NULL or exceeds %d characters",
+			APC_SHM_NAME_MAX);
+		return NULL;
+	}
 
 	snprintf(mapping_name, sizeof(mapping_name), "Local\\APCu_%s_0", shm_name);
 

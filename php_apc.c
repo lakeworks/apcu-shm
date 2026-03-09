@@ -304,6 +304,14 @@ static PHP_MINIT_FUNCTION(apcu)
 						APCG(entries_hint), APCG(gc_ttl), APCG(ttl),
 						APCG(smart), APCG(slam_defense));
 
+					if (!apc_user_cache) {
+						apc_windows_shm_init_unlock(init_lock);
+						apc_windows_shm_detach(shm);
+						zend_error_noreturn(E_CORE_ERROR,
+							"APCu: Failed to create cache in shared memory segment '%s'",
+							APCG(shm_name));
+					}
+
 					/* Store layout info for future attaching processes */
 					apc_sma_set_cache_info(&apc_sma,
 						(size_t)((char *)apc_user_cache->header - (char *)apc_sma.shmaddr),
@@ -337,6 +345,14 @@ static PHP_MINIT_FUNCTION(apcu)
 						&apc_sma,
 						apc_find_serializer(APCG(serializer_name)),
 						APCG(gc_ttl), APCG(ttl), APCG(smart), APCG(slam_defense));
+
+					if (!apc_user_cache) {
+						apc_windows_shm_init_unlock(init_lock);
+						apc_windows_shm_detach(shm);
+						zend_error_noreturn(E_CORE_ERROR,
+							"APCu: Failed to attach to cache in shared memory segment '%s'",
+							APCG(shm_name));
+					}
 				}
 
 				/* Store the shm handle for cleanup on MSHUTDOWN */

@@ -652,9 +652,9 @@ PHP_APCU_API size_t apc_sma_get_cache_nslots(apc_sma_t *sma) {
 PHP_APCU_API zend_bool apc_sma_is_init_complete(apc_sma_t *sma) {
 	sma_header_t *smaheader = SMA_HDR(sma);
 	/* Read the flag with acquire semantics to ensure we see all
-	 * prior writes (cache_header_offset, nslots, etc.) */
+	 * prior writes (cache_header_offset, nslots, etc.).
+	 * InterlockedCompareExchange has full barrier semantics on x86/x64. */
 	LONG val = InterlockedCompareExchange(&smaheader->init_complete, 0, 0);
-	MemoryBarrier();
 	return val == 1;
 }
 #endif /* PHP_WIN32 */
