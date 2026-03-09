@@ -48,11 +48,21 @@
 #endif
 
 typedef struct sma_header_t sma_header_t;
+/* ABI version for the Windows shared header layout.
+ * Increment whenever sma_header_t or apc_cache_header_t changes
+ * to prevent mixed-DLL workers from misinterpreting shared memory.
+ * Version history:
+ *   1 = initial named SHM layout (2026-03)
+ *   2 = added serializer_name field (2026-03)
+ */
+#define APC_SHM_ABI_VERSION 2
+
 struct sma_header_t {
 	apc_mutex_t sma_lock;   /* segment lock */
 	size_t min_block_size;  /* expected minimum size of allocated blocks */
 	size_t avail;           /* bytes available (not necessarily contiguous) */
 #ifdef PHP_WIN32
+	uint32_t abi_version;        /* MUST be first Windows field — checked before anything else */
 	size_t cache_header_offset;  /* offset of apc_cache_header_t from segment base */
 	size_t nslots;               /* number of cache hash slots */
 	size_t max_alloc_size;       /* max allocatable size (for attaching processes) */
@@ -590,6 +600,7 @@ PHP_APCU_API void apc_sma_init_from_addr(
 	smaheader->min_block_size = min_alloc_size > 0 ? ALIGNWORD(min_alloc_size + ALIGNWORD(sizeof(block_t))) : MINBLOCKSIZE;
 	smaheader->avail = sma->size - ALIGNWORD(sizeof(sma_header_t)) - ALIGNWORD(sizeof(block_t)) - ALIGNWORD(sizeof(block_t));
 	sma->max_alloc_size = smaheader->avail - ALIGNWORD(sizeof(block_t));
+	smaheader->abi_version = APC_SHM_ABI_VERSION;
 	smaheader->cache_header_offset = 0;
 	smaheader->nslots = 0;
 	smaheader->max_alloc_size = sma->max_alloc_size;
@@ -618,12 +629,24 @@ PHP_APCU_API void apc_sma_attach(
 	sma->data = data;
 	sma->shmaddr = addr;
 
+	/* ABI version check — MUST be done before reading any other header field.
+	 * A version mismatch means the struct layout differs (e.g. mixed-DLL rollout
+	 * or upgrade during IIS recycle). Reading fields at wrong offsets would cause
+	 * corruption or crashes. Fail hard so the admin recycles the app pool. */
+	smaheader = SMA_HDR(sma);
+	if (smaheader->abi_version != APC_SHM_ABI_VERSION) {
+		zend_error_noreturn(E_CORE_ERROR,
+			"APCu: Shared memory ABI version mismatch (segment has v%u, this build expects v%u). "
+			"Recycle the IIS app pool to destroy the old segment and create a fresh one.",
+			(unsigned)smaheader->abi_version, (unsigned)APC_SHM_ABI_VERSION);
+		return;
+	}
+
 	/* Read the actual segment size from the shared header rather than
 	 * trusting the caller's apc.shm_size INI value. CreateFileMapping
 	 * ignores the requested size when opening an existing mapping, so
 	 * a size mismatch would make the allocator walk blocks past the
 	 * mapped view boundary. */
-	smaheader = SMA_HDR(sma);
 	if (smaheader->seg_size > 0) {
 		/* Sanity check: seg_size must be at least large enough for the header
 		 * plus three block_t structs (sentinel, one free block, end sentinel).
