@@ -162,6 +162,7 @@ STD_PHP_INI_BOOLEAN("apc.use_request_time", "0", PHP_INI_ALL, OnUpdateBool, use_
 STD_PHP_INI_ENTRY("apc.serializer", "php", PHP_INI_SYSTEM, OnUpdateStringUnempty, serializer_name, zend_apcu_globals, apcu_globals)
 #ifdef PHP_WIN32
 STD_PHP_INI_ENTRY("apc.shm_name", "", PHP_INI_SYSTEM, OnUpdateString, shm_name, zend_apcu_globals, apcu_globals)
+STD_PHP_INI_BOOLEAN("apc.windows_shared_only", "0", PHP_INI_SYSTEM, OnUpdateBool, windows_shared_only, zend_apcu_globals, apcu_globals)
 #endif
 PHP_INI_END()
 
@@ -363,10 +364,18 @@ static PHP_MINIT_FUNCTION(apcu)
 				}
 
 				apc_windows_shm_init_unlock(init_lock);
-			} else
-#endif /* PHP_WIN32 */
-			{
-				/* ====== Standard path (per-process or POSIX shared) ====== */
+			} else if (APCG(windows_shared_only)) {
+				/* apc.windows_shared_only=1 but apc.shm_name is empty — disable APCu.
+				 * Without a named segment each php-cgi.exe gets its own anonymous
+				 * memory, wasting RAM and breaking cross-process invalidation. */
+				apc_warning("APCu: apc.windows_shared_only is enabled but apc.shm_name is not set. "
+					"APCu will be disabled for this process. Set apc.shm_name to your "
+					"application pool name to enable cross-process cache sharing.");
+				APCG(enabled) = 0;
+				APCG(initialized) = 0;
+			} else {
+				/* No shm_name, no requirement — fall back to per-process anonymous memory.
+				 * This is the stock APCu behavior (no cross-process sharing). */
 				apc_sma_init(
 					&apc_sma, (void **) &apc_user_cache,
 					(apc_sma_expunge_f) apc_cache_default_expunge,
@@ -378,6 +387,21 @@ static PHP_MINIT_FUNCTION(apcu)
 					APCG(entries_hint), APCG(gc_ttl), APCG(ttl),
 					APCG(smart), APCG(slam_defense));
 			}
+#else
+			{
+				/* ====== Standard path (POSIX shared via mmap/fork) ====== */
+				apc_sma_init(
+					&apc_sma, (void **) &apc_user_cache,
+					(apc_sma_expunge_f) apc_cache_default_expunge,
+					APCG(shm_size), APC_ENTRY_SIZE(0), mmap_file_mask, mmap_hugepage_size);
+
+				apc_user_cache = apc_cache_create(
+					&apc_sma,
+					apc_find_serializer(APCG(serializer_name)),
+					APCG(entries_hint), APCG(gc_ttl), APCG(ttl),
+					APCG(smart), APCG(slam_defense));
+			}
+#endif /* PHP_WIN32 */
 
 			/* preload data from path specified in configuration */
 			if (APCG(preload_path)) {

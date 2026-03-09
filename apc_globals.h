@@ -62,6 +62,7 @@ ZEND_BEGIN_MODULE_GLOBALS(apcu)
 
 #ifdef PHP_WIN32
 	char *shm_name;              /* named shared memory segment identifier */
+	zend_bool windows_shared_only; /* if true, disable APCu when shm_name is not set */
 #endif
 
 	/* Nesting level of apcu_entry calls. */
