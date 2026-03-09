@@ -382,6 +382,19 @@ PHP_APCU_API apc_cache_t* apc_cache_attach(
 		return NULL;
 	}
 
+	/* Bounds check: verify the cache header + slot table fits within the
+	 * mapped segment. A corrupted or stale shared header could contain
+	 * offsets that point outside the mapped view, causing access violations. */
+	{
+		size_t cache_end = cache_header_offset + sizeof(apc_cache_header_t) + nslots * sizeof(uintptr_t);
+		if (cache_end < cache_header_offset /* overflow */ || cache_end > sma->size) {
+			apc_error("apc_cache_attach: cache layout exceeds segment bounds "
+				"(offset=%zu, nslots=%zu, required=%zu, segment=%zu)",
+				cache_header_offset, nslots, cache_end, sma->size);
+			return NULL;
+		}
+	}
+
 	/* Allocate per-process descriptor (NOT in shared memory) */
 	cache = pemalloc(sizeof(apc_cache_t), 1);
 	memset(cache, 0, sizeof(apc_cache_t));

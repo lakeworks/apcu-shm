@@ -61,10 +61,17 @@ HANDLE apc_windows_shm_init_lock(const char *shm_name)
 
 	/* Apply the same DACL to the mutex as to the shared memory segment,
 	 * preventing name-squatting attacks from other processes in the same
-	 * logon session. */
-	if (apc_windows_build_dacl(&sa, &sd_info)) {
-		psa = &sa;
+	 * logon session. Fail closed: if DACL construction fails, do not
+	 * create the mutex without security — that would silently drop
+	 * app-pool isolation. */
+	if (!apc_windows_build_dacl(&sa, &sd_info)) {
+		zend_error_noreturn(E_CORE_ERROR,
+			"apc_windows_shm_init_lock: Failed to build DACL for init mutex '%s'. "
+			"Cannot safely create shared memory without app-pool isolation.",
+			mutex_name);
+		return NULL;
 	}
+	psa = &sa;
 
 	mutex = CreateMutexA(psa, FALSE, mutex_name);
 	apc_windows_free_dacl(&sd_info);
@@ -123,10 +130,15 @@ apc_windows_shm_t *apc_windows_shm_create(const char *shm_name, size_t size)
 
 	snprintf(mapping_name, sizeof(mapping_name), "Local\\APCu_%s_0", shm_name);
 
-	/* Build DACL for app pool isolation */
-	if (apc_windows_build_dacl(&sa, &sd_info)) {
-		psa = &sa;
+	/* Build DACL for app pool isolation. Fail closed: do not create
+	 * the mapping without security — that would silently drop isolation. */
+	if (!apc_windows_build_dacl(&sa, &sd_info)) {
+		apc_error("apc_windows_shm_create: Failed to build DACL for mapping '%s'. "
+			"Cannot safely create shared memory without app-pool isolation.",
+			mapping_name);
+		return NULL;
 	}
+	psa = &sa;
 
 	/* Split size into high/low DWORDs for CreateFileMapping */
 #ifdef _WIN64

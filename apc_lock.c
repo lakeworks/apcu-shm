@@ -58,10 +58,17 @@ static inline void apc_lock_spin_wait(int spins) {
 	}
 }
 
-/* Clear the writer flag and PID atomically. */
-static inline void apc_lock_clear_writer(apc_lock_t *lock) {
-	InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
-	InterlockedExchange(&lock->writer, 0);
+/* Try to clear the writer flag, but ONLY if the current writer_pid matches
+ * the expected PID. This prevents revoking a lock from a live process that
+ * reacquired it after the original holder died or was slow.
+ * Returns 1 if cleared, 0 if the writer changed (another process took over). */
+static inline int apc_lock_try_clear_writer(apc_lock_t *lock, DWORD expected_pid) {
+	if (InterlockedCompareExchange((volatile LONG *)&lock->writer_pid,
+			0, (LONG)expected_pid) == (LONG)expected_pid) {
+		InterlockedExchange(&lock->writer, 0);
+		return 1;
+	}
+	return 0;  /* Writer changed — someone else holds it now */
 }
 
 /* Check if a process is still alive. Returns 1 if alive, 0 if dead/unknown. */
@@ -102,6 +109,7 @@ PHP_APCU_API zend_bool apc_lock_create(apc_lock_t *lock) {
 static inline zend_bool apc_lock_rlock_impl(apc_lock_t *lock) {
 	int spins = 0;
 	ULONGLONG start_tick = 0;
+	DWORD timeout_pid = 0;
 
 	for (;;) {
 		/* Wait until no writer is active.
@@ -116,15 +124,20 @@ static inline zend_bool apc_lock_rlock_impl(apc_lock_t *lock) {
 			if (spins >= APC_LOCK_SPIN_CRASH_CHECK && (spins & 0x3FF) == 0) {
 				DWORD holder_pid = lock->writer_pid;
 				if (holder_pid != 0 && !apc_lock_process_alive(holder_pid)) {
-					apc_lock_clear_writer(lock);
+					/* CAS: only clear if still the same dead PID — prevents
+					 * revoking a lock from a new writer that reacquired it. */
+					apc_lock_try_clear_writer(lock, holder_pid);
 					break;
 				}
 
-				/* Wall-clock safety timeout (handles PID reuse edge case) */
+				/* Wall-clock safety timeout (handles PID reuse edge case).
+				 * Snapshot the PID at timeout start so we only clear THIS
+				 * holder, not a new one that acquired the lock since. */
 				if (start_tick == 0) {
 					start_tick = GetTickCount64();
+					timeout_pid = holder_pid;
 				} else if (GetTickCount64() - start_tick > APC_LOCK_TIMEOUT_MS) {
-					apc_lock_clear_writer(lock);
+					apc_lock_try_clear_writer(lock, timeout_pid);
 					break;
 				}
 			}
@@ -149,6 +162,7 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 	DWORD my_pid = GetCurrentProcessId();
 	int spins = 0;
 	ULONGLONG start_tick = 0;
+	DWORD timeout_pid = 0;
 
 	for (;;) {
 		/* Try to acquire the writer flag */
@@ -160,19 +174,23 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 			 * Use wall-clock timeout instead of spin count to avoid
 			 * false positives from OS thread descheduling under heavy load.
 			 * A descheduled reader holding a read lock for seconds is normal;
-			 * only a reader that has actually CRASHED warrants a force-reset. */
+			 * if the timeout fires, we ABORT the write attempt rather than
+			 * force-resetting readers (which would let us enter the critical
+			 * section while readers are still traversing shared data). */
 			{
 				int drain_spins = 0;
 				ULONGLONG drain_start = GetTickCount64();
 				while (lock->readers) {
 					apc_lock_spin_wait(++drain_spins);
 
-					/* Check wall-clock timeout every 4096 spins to avoid
-					 * calling GetTickCount64 on every iteration. */
 					if ((drain_spins & 0xFFF) == 0) {
 						if (GetTickCount64() - drain_start > APC_LOCK_TIMEOUT_MS) {
-							InterlockedExchange(&lock->readers, 0);
-							break;
+							/* Abort: release the writer flag and fail.
+							 * Do NOT reset readers — they may be live. */
+							apc_warning("apc_lock_wlock: timed out waiting for readers to drain");
+							InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
+							InterlockedExchange(&lock->writer, 0);
+							return 0;
 						}
 					}
 				}
@@ -192,20 +210,27 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 			DWORD holder_pid = lock->writer_pid;
 			if (holder_pid != 0 && holder_pid != my_pid
 				&& !apc_lock_process_alive(holder_pid)) {
-				apc_lock_clear_writer(lock);
-				spins = 0;
-				start_tick = 0;
-				continue;
+				/* CAS: only clear if still the same dead PID */
+				if (apc_lock_try_clear_writer(lock, holder_pid)) {
+					spins = 0;
+					start_tick = 0;
+					timeout_pid = 0;
+					continue;
+				}
 			}
 
-			/* Wall-clock safety timeout (handles PID reuse edge case) */
+			/* Wall-clock safety timeout (handles PID reuse edge case).
+			 * Snapshot the PID so we only clear THIS holder. */
 			if (start_tick == 0) {
 				start_tick = GetTickCount64();
+				timeout_pid = holder_pid;
 			} else if (GetTickCount64() - start_tick > APC_LOCK_TIMEOUT_MS) {
-				apc_lock_clear_writer(lock);
-				spins = 0;
-				start_tick = 0;
-				continue;
+				if (apc_lock_try_clear_writer(lock, timeout_pid)) {
+					spins = 0;
+					start_tick = 0;
+					timeout_pid = 0;
+					continue;
+				}
 			}
 		}
 
@@ -222,7 +247,8 @@ PHP_APCU_API zend_bool apc_lock_wunlock(apc_lock_t *lock) {
 	 * correctness on ARM64 Windows where Interlocked ops may have weaker
 	 * ordering guarantees. */
 	MemoryBarrier();
-	apc_lock_clear_writer(lock);
+	InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
+	InterlockedExchange(&lock->writer, 0);
 	return 1;
 }
 
