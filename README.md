@@ -18,13 +18,34 @@ IIS spawns php-cgi.exe #2 -> CreateFileMapping("Local\APCu_{name}_0") -> attache
 ## Configuration
 
 ```ini
-; Enable cross-process shared cache (Windows only)
-apc.shm_name = "my_site_pool"    ; Unique name per IIS app pool / website
-apc.shm_size = 32M               ; Shared memory size
+; php.ini - Enable cross-process shared cache (Windows only)
+apc.shm_name = "my_site_pool"       ; Unique name per IIS app pool / website
+apc.shm_size = 32M                  ; Shared memory size
 apc.enabled = 1
+apc.windows_shared_only = 1         ; Disable APCu if shm_name is not set (recommended)
 ```
 
-When `apc.shm_name` is empty (default), APCu behaves exactly like stock -- per-process cache, fully backward-compatible.
+### Directives
+
+| Directive | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `apc.shm_name` | string | `""` | Named shared memory segment identifier. Processes with the same name share one cache. If empty, falls back to per-process anonymous memory. |
+| `apc.windows_shared_only` | bool | `0` | When enabled, APCu is disabled if `apc.shm_name` is not set. Prevents accidental per-process mode which wastes memory and breaks invalidation. |
+
+Both directives are `PHP_INI_SYSTEM` (php.ini only, not per-directory).
+
+### Multi-site / multi-pool
+
+Each IIS application pool should use a unique `apc.shm_name`. Configure per-pool `php.ini` files:
+
+```
+Pool "site_a" -> php.ini: apc.shm_name = "site_a"
+Pool "site_b" -> php.ini: apc.shm_name = "site_b"
+```
+
+Isolation is enforced at two levels:
+1. **Naming**: different names = different segments
+2. **DACL**: OS-level access control blocks cross-pool access even if names collide
 
 ## What Changed
 
@@ -32,31 +53,43 @@ All changes are `#ifdef PHP_WIN32` guarded. Linux builds are **completely unaffe
 
 | Component | Change |
 |-----------|--------|
-| **Named shared memory** (`apc_windows_shm.c/h`) | `CreateFileMapping` with `Local\APCu_{name}` names. First process creates + initializes; others detect `ERROR_ALREADY_EXISTS` and attach. |
-| **Cross-process locking** (`apc_lock.c/h`) | Replaced per-process `SRWLOCK` with atomics-based rwlock stored IN shared memory. Uses `InterlockedCompareExchange` / `InterlockedIncrement`. Crash recovery via PID tracking. |
-| **Security** (`apc_windows_security.c/h`) | DACL on file mapping restricted to the current process identity. Different IIS app pools can't access each other's segments. |
-| **SMA attach** (`apc_sma.c/h`) | New `apc_sma_attach()` path: skips free-list initialization when joining existing segment. |
-| **Cache attach** (`apc_cache.c/h`) | New `apc_cache_attach()`: wraps existing shared cache header with per-process descriptor. |
-| **INI** (`php_apc.c`, `apc_globals.h`) | New `apc.shm_name` directive (PHP_INI_SYSTEM). |
+| **Named shared memory** (`apc_windows_shm.c/h`) | `CreateFileMapping` with `Local\APCu_{name}` names. First process creates + initializes; others detect `ERROR_ALREADY_EXISTS` and attach. `VirtualQuery` validates actual mapped region size. |
+| **Cross-process locking** (`apc_lock.c/h`) | Replaced per-process `SRWLOCK` with atomics-based rwlock stored IN shared memory. Uses `InterlockedCompareExchange` for CAS-based crash recovery via PID tracking. Writer aborts on reader drain timeout (no force-reset). |
+| **Security** (`apc_windows_security.c/h`) | DACL on both file mapping and init mutex, restricted to current process identity (fail-closed). Least-privilege permissions: `FILE_MAP_ALL_ACCESS \| MUTEX_ALL_ACCESS \| SYNCHRONIZE`. |
+| **SMA attach** (`apc_sma.c/h`) | New `apc_sma_attach()` path: skips free-list initialization when joining existing segment. Validates `seg_size` against actual mapped region, caps `max_alloc_size`. |
+| **Cache attach** (`apc_cache.c/h`) | New `apc_cache_attach()`: wraps existing shared cache header with per-process descriptor. Overflow-safe bounds check on `nslots`. |
+| **INI** (`php_apc.c`, `apc_globals.h`) | New `apc.shm_name` and `apc.windows_shared_only` directives (PHP_INI_SYSTEM). |
 | **Build** (`config.w32`) | Updated source list, removed obsolete SRWLOCK kernel module. |
+
+## Security Model
+
+- **`Local\` namespace**: segments scoped to the Windows logon session -- different sessions can't collide
+- **DACL**: explicit access control list restricts access to the current process identity only
+- **Fail-closed**: if DACL construction fails, segment/mutex creation is denied (no silent fallback)
+- **Name validation**: `apc.shm_name` is validated for safe characters (alphanumeric, underscore, hyphen, dot) and length (max 200 chars)
+- **Bounds validation**: attach path validates all shared header metadata against the actual OS-reported mapped region size via `VirtualQuery`, preventing forged metadata from inflating usable bounds
+- **Integer overflow protection**: `nslots * sizeof(uintptr_t)` checked against `SIZE_MAX` before use
 
 ## Process Lifecycle
 
 ```
 IIS starts app pool
   -> spawns php-cgi.exe #1
-    -> MINIT: acquires init mutex, CreateFileMapping (NEW), init SMA + cache
-    -> releases init mutex
+    -> MINIT: acquires init mutex (DACL-protected), CreateFileMapping (NEW)
+    -> initializes SMA free-list, cache header, slot table
+    -> sets init_complete flag, releases init mutex
     -> serves requests, reads/writes shared cache
 
   -> spawns php-cgi.exe #2
-    -> MINIT: acquires init mutex, CreateFileMapping (EXISTING), attach SMA + cache
+    -> MINIT: acquires init mutex, CreateFileMapping (EXISTING)
+    -> attaches SMA + cache (skips init, validates bounds)
+    -> waits for init_complete (30s wall-clock timeout)
     -> releases init mutex
     -> sees all keys from process #1 immediately
 
   -> php-cgi.exe #1 crashes
     -> segment persists (process #2 still holds a handle)
-    -> stale write lock detected via PID check, auto-reset
+    -> stale write lock detected via CAS on writer_pid, auto-recovered
 
   -> IIS recycles app pool
     -> all processes exit, all handles close
@@ -86,7 +119,7 @@ Target: PHP 8.4+ NTS on Windows/IIS FastCGI.
 4. **Crash recovery**: `taskkill /f` a process mid-write, others don't deadlock
 5. **App pool recycle**: Cache is empty after restart (segment destroyed + recreated)
 6. **Isolation**: Different `apc.shm_name` values = no cross-contamination
-7. **Backward compat**: Empty `apc.shm_name` = stock per-process behavior
+7. **Enforced mode**: `apc.windows_shared_only = 1` with empty `apc.shm_name` = APCu disabled
 
 ## Credits
 
