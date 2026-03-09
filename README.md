@@ -54,9 +54,9 @@ All changes are `#ifdef PHP_WIN32` guarded. Linux builds are **completely unaffe
 | Component | Change |
 |-----------|--------|
 | **Named shared memory** (`apc_windows_shm.c/h`) | `CreateFileMapping` with `Local\APCu_{name}` names. First process creates + initializes; others detect `ERROR_ALREADY_EXISTS` and attach. `VirtualQuery` validates actual mapped region size. |
-| **Cross-process locking** (`apc_lock.c/h`) | Replaced per-process `SRWLOCK` with atomics-based rwlock stored IN shared memory. Uses `InterlockedCompareExchange` for CAS-based crash recovery via PID tracking. Writer aborts on reader drain timeout (no force-reset). |
+| **Cross-process locking** (`apc_lock.c/h`) | Replaced per-process `SRWLOCK` with atomics-based rwlock stored IN shared memory. Uses `InterlockedCompareExchange` for CAS-based crash recovery via PID tracking. Only dead processes get locks revoked (`apc_lock_process_alive()` check); live slow writers are waited on. Writer aborts on reader drain timeout (no force-reset). |
 | **Security** (`apc_windows_security.c/h`) | DACL on both file mapping and init mutex, restricted to current process identity (fail-closed). Least-privilege permissions: `FILE_MAP_ALL_ACCESS \| MUTEX_ALL_ACCESS \| SYNCHRONIZE`. |
-| **SMA attach** (`apc_sma.c/h`) | New `apc_sma_attach()` path: skips free-list initialization when joining existing segment. Validates `seg_size` against actual mapped region, caps `max_alloc_size`. |
+| **SMA attach** (`apc_sma.c/h`) | New `apc_sma_attach()` path: skips free-list initialization when joining existing segment. ABI version guard (`APC_SHM_ABI_VERSION`) checked first on attach. Serializer name persisted in shared header for cross-process validation. Validates `seg_size` against actual mapped region, caps `max_alloc_size`. |
 | **Cache attach** (`apc_cache.c/h`) | New `apc_cache_attach()`: wraps existing shared cache header with per-process descriptor. Overflow-safe bounds check on `nslots`. |
 | **INI** (`php_apc.c`, `apc_globals.h`) | New `apc.shm_name` and `apc.windows_shared_only` directives (PHP_INI_SYSTEM). |
 | **Build** (`config.w32`) | Updated source list, removed obsolete SRWLOCK kernel module. |
@@ -67,8 +67,11 @@ All changes are `#ifdef PHP_WIN32` guarded. Linux builds are **completely unaffe
 - **DACL**: explicit access control list restricts access to the current process identity only
 - **Fail-closed**: if DACL construction fails, segment/mutex creation is denied (no silent fallback)
 - **Name validation**: `apc.shm_name` is validated for safe characters (alphanumeric, underscore, hyphen, dot) and length (max 200 chars)
+- **ABI version guard**: `APC_SHM_ABI_VERSION` is checked first on attach — version mismatch (e.g., after DLL update) produces a fatal error directing the user to recycle the app pool
+- **Serializer validation**: creator persists `apc.serializer` name in shared header; attacher validates with exact `strcmp` — mismatch is fatal (prevents silent data corruption between workers using different serializers)
 - **Bounds validation**: attach path validates all shared header metadata against the actual OS-reported mapped region size via `VirtualQuery`, preventing forged metadata from inflating usable bounds
 - **Integer overflow protection**: `nslots * sizeof(uintptr_t)` checked against `SIZE_MAX` before use
+- **Lock safety**: lock timeout only revokes dead writers (verified via `OpenProcess` on stored PID); live slow processes are waited on indefinitely
 
 ## Process Lifecycle
 
