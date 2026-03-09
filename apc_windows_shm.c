@@ -183,6 +183,33 @@ apc_windows_shm_t *apc_windows_shm_create(const char *shm_name, size_t size)
 		return NULL;
 	}
 
+	/* Query the actual mapped region size from the OS. When attaching to
+	 * a pre-existing mapping, CreateFileMapping ignores the requested size
+	 * and returns the original section's size. We must use the real mapped
+	 * size so that bounds checks in apc_sma_attach / apc_cache_attach
+	 * validate against what's actually accessible, not an inflated request. */
+	{
+		MEMORY_BASIC_INFORMATION mbi;
+		size_t actual_size;
+
+		if (VirtualQuery(addr, &mbi, sizeof(mbi)) == 0) {
+			DWORD err = GetLastError();
+			UnmapViewOfFile(addr);
+			CloseHandle(mapping);
+			apc_error("apc_windows_shm_create: VirtualQuery failed: %lu", err);
+			return NULL;
+		}
+		actual_size = mbi.RegionSize;
+
+		/* If we're attaching to an existing mapping that is smaller than
+		 * requested, use the actual size — it's all we have access to. */
+		if (!is_new && actual_size < size) {
+			apc_warning("apc_windows_shm_create: mapped region (%zu bytes) is smaller "
+				"than requested (%zu bytes) — using actual size", actual_size, size);
+			size = actual_size;
+		}
+	}
+
 	apc_windows_shm_t *shm = pemalloc(sizeof(apc_windows_shm_t), 1);
 	shm->mapping_handle = mapping;
 	shm->addr = addr;

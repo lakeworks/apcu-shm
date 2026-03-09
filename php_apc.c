@@ -322,11 +322,14 @@ static PHP_MINIT_FUNCTION(apcu)
 						(size_t)((char *)apc_user_cache->header - (char *)apc_sma.shmaddr),
 						apc_user_cache->nslots);
 				} else {
-					/* Attaching to existing segment: skip initialization */
+					/* Attaching to existing segment: skip initialization.
+					 * Pass shm->size (validated by VirtualQuery) rather than
+					 * the INI-derived shm_size — the actual mapping may be
+					 * smaller if we attached to a pre-existing segment. */
 					apc_sma_attach(
 						&apc_sma, (void **) &apc_user_cache,
 						(apc_sma_expunge_f) apc_cache_default_expunge,
-						shm->addr, shm_size);
+						shm->addr, shm->size);
 
 					/* Wait for the creating process to finish init.
 					 * This should be near-instant since we hold the init mutex,

@@ -627,12 +627,18 @@ PHP_APCU_API void apc_sma_attach(
 		/* Sanity check: seg_size must be at least large enough for the header
 		 * plus three block_t structs (sentinel, one free block, end sentinel).
 		 * A corrupted or maliciously pre-created segment could have nonsensical
-		 * values that would cause the allocator to walk past the mapped view. */
+		 * values that would cause the allocator to walk past the mapped view.
+		 *
+		 * Also reject seg_size that exceeds the actual mapped region size
+		 * (passed as `size` from VirtualQuery). A pre-existing smaller mapping
+		 * with forged header metadata must not inflate the usable bounds. */
 		size_t min_viable = ALIGNWORD(sizeof(sma_header_t)) + 3 * ALIGNWORD(sizeof(block_t));
-		if (smaheader->seg_size < min_viable || smaheader->seg_size > (size_t)1 << 40) {
-			apc_warning("apc_sma_attach: shared header seg_size=%zu is invalid (min=%zu), using caller's size",
-				smaheader->seg_size, min_viable);
-			sma->size = ALIGNWORD(size);
+		size_t actual_limit = ALIGNWORD(size);
+		if (smaheader->seg_size < min_viable || smaheader->seg_size > actual_limit) {
+			apc_warning("apc_sma_attach: shared header seg_size=%zu is invalid "
+				"(min=%zu, mapped=%zu), using mapped size",
+				smaheader->seg_size, min_viable, actual_limit);
+			sma->size = actual_limit;
 		} else {
 			sma->size = smaheader->seg_size;
 		}

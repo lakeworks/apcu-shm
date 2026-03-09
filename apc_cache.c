@@ -384,10 +384,25 @@ PHP_APCU_API apc_cache_t* apc_cache_attach(
 
 	/* Bounds check: verify the cache header + slot table fits within the
 	 * mapped segment. A corrupted or stale shared header could contain
-	 * offsets that point outside the mapped view, causing access violations. */
+	 * offsets that point outside the mapped view, causing access violations.
+	 *
+	 * Check for overflow at each step: nslots * sizeof(uintptr_t) can wrap
+	 * on 32-bit if nslots is forged to a large value, so validate the
+	 * multiplication before adding it to cache_header_offset. */
 	{
-		size_t cache_end = cache_header_offset + sizeof(apc_cache_header_t) + nslots * sizeof(uintptr_t);
-		if (cache_end < cache_header_offset /* overflow */ || cache_end > sma->size) {
+		size_t slot_bytes = nslots * sizeof(uintptr_t);
+		size_t cache_end;
+
+		/* Overflow check on nslots multiplication */
+		if (nslots > SIZE_MAX / sizeof(uintptr_t)) {
+			apc_error("apc_cache_attach: nslots overflow (nslots=%zu)", nslots);
+			return NULL;
+		}
+
+		cache_end = cache_header_offset + sizeof(apc_cache_header_t) + slot_bytes;
+
+		/* Overflow check on the addition chain */
+		if (cache_end < cache_header_offset || cache_end > sma->size) {
 			apc_error("apc_cache_attach: cache layout exceeds segment bounds "
 				"(offset=%zu, nslots=%zu, required=%zu, segment=%zu)",
 				cache_header_offset, nslots, cache_end, sma->size);
