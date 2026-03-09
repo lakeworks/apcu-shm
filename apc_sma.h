@@ -65,7 +65,6 @@ typedef struct _apc_sma_t {
 
 #ifdef PHP_WIN32
 	void *win_shm;                 /* pointer to apc_windows_shm_t (named shm handle) */
-	zend_bool is_new_segment;      /* TRUE if this process created the segment */
 #endif
 } apc_sma_t;
 

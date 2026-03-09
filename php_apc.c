@@ -359,7 +359,6 @@ static PHP_MINIT_FUNCTION(apcu)
 
 				/* Store the shm handle for cleanup on MSHUTDOWN */
 				apc_sma.win_shm = shm;
-				apc_sma.is_new_segment = shm->is_new;
 
 				apc_windows_shm_init_unlock(init_lock);
 			} else

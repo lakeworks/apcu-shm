@@ -52,9 +52,7 @@ PHP_APCU_API void apc_lock_cleanup() {
 }
 
 PHP_APCU_API zend_bool apc_lock_create(apc_lock_t *lock) {
-	lock->readers = 0;
-	lock->writer = 0;
-	lock->writer_pid = 0;
+	memset(lock, 0, sizeof(apc_lock_t));
 	return 1;
 }
 

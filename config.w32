@@ -15,8 +15,10 @@ if(PHP_APCU != 'no')
 						'apc_time.c ' +
 						'apc_iterator.c ' +
 						'apc_persist.c ' +
-						'apc_windows_shm.c ' +
-						'apc_windows_security.c';
+						'apc_windows_shm.c ' +       /* named shared memory for cross-process sharing */
+						'apc_windows_security.c';    /* DACL for app pool isolation */
+	/* Note: Windows SHM files are always compiled but only active when apc.shm_name is set.
+	   When apc.shm_name is empty, APCu falls back to per-process anonymous mappings. */
 
 	if(PHP_APCU_DEBUG != 'no')
 	{
