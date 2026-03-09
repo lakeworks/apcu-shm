@@ -384,6 +384,7 @@ PHP_APCU_API apc_cache_t* apc_cache_attach(
 
 	/* Allocate per-process descriptor (NOT in shared memory) */
 	cache = pemalloc(sizeof(apc_cache_t), 1);
+	memset(cache, 0, sizeof(apc_cache_t));
 
 	/* Point to the existing header in shared memory */
 	cache->header = (apc_cache_header_t *)((char *)sma->shmaddr + cache_header_offset);

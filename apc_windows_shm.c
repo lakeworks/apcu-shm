@@ -24,14 +24,33 @@
  * 200 chars leaves room for the ~20-char prefix/suffix in a 256-byte buffer. */
 #define APC_SHM_NAME_MAX 200
 
+/* Validate that shm_name contains only safe characters for Windows named objects.
+ * Allows alphanumeric, underscore, hyphen, and dot. */
+static int apc_windows_shm_validate_name(const char *name) {
+	const char *p;
+	if (!name || !name[0]) {
+		return 0;
+	}
+	if (strlen(name) > APC_SHM_NAME_MAX) {
+		return 0;
+	}
+	for (p = name; *p; p++) {
+		if (!((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+		      (*p >= '0' && *p <= '9') || *p == '_' || *p == '-' || *p == '.')) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
 HANDLE apc_windows_shm_init_lock(const char *shm_name)
 {
 	char mutex_name[256];
 	HANDLE mutex;
 
-	if (!shm_name || strlen(shm_name) > APC_SHM_NAME_MAX) {
+	if (!apc_windows_shm_validate_name(shm_name)) {
 		zend_error_noreturn(E_CORE_ERROR,
-			"apc_windows_shm_init_lock: shm_name is NULL or exceeds %d characters",
+			"apc_windows_shm_init_lock: shm_name is invalid (must be 1-%d chars, alphanumeric/underscore/hyphen/dot only)",
 			APC_SHM_NAME_MAX);
 		return NULL;
 	}
@@ -86,8 +105,8 @@ apc_windows_shm_t *apc_windows_shm_create(const char *shm_name, size_t size)
 	apc_windows_sd_t sd_info = {0};
 	DWORD size_high, size_low;
 
-	if (!shm_name || strlen(shm_name) > APC_SHM_NAME_MAX) {
-		apc_error("apc_windows_shm_create: shm_name is NULL or exceeds %d characters",
+	if (!apc_windows_shm_validate_name(shm_name)) {
+		apc_error("apc_windows_shm_create: shm_name is invalid (must be 1-%d chars, alphanumeric/underscore/hyphen/dot only)",
 			APC_SHM_NAME_MAX);
 		return NULL;
 	}

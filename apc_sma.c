@@ -565,6 +565,9 @@ PHP_APCU_API void apc_sma_init_from_addr(
 	 * Initialize the SMA using a pre-allocated shared memory address.
 	 * This is used when the current process CREATED a new named shared memory segment.
 	 * Performs full initialization of the SMA header and free list.
+	 *
+	 * Note: Windows guarantees that pages from CreateFileMapping(INVALID_HANDLE_VALUE)
+	 * are zero-initialized, so we only need to set non-zero fields explicitly.
 	 */
 	if (sma->initialized) {
 		return;

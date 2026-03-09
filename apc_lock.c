@@ -61,7 +61,9 @@ PHP_APCU_API zend_bool apc_lock_create(apc_lock_t *lock) {
 static inline zend_bool apc_lock_rlock_impl(apc_lock_t *lock) {
 	int spins = 0;
 	for (;;) {
-		/* Wait until no writer is active */
+		/* Wait until no writer is active.
+		 * Plain volatile read is naturally atomic for aligned LONG on x86/x64.
+		 * On ARM64, volatile provides acquire semantics via MSVC /volatile:ms. */
 		while (lock->writer) {
 			if (++spins < APC_LOCK_SPIN_YIELD) {
 				YieldProcessor();
@@ -92,10 +94,13 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 	for (;;) {
 		/* Try to acquire the writer flag */
 		if (InterlockedCompareExchange(&lock->writer, 1, 0) == 0) {
-			/* We are the writer */
-			lock->writer_pid = my_pid;
+			/* We are the writer. Use atomic store for ARM64 portability. */
+			InterlockedExchange((volatile LONG *)&lock->writer_pid, (LONG)my_pid);
 
-			/* Wait for all readers to drain */
+			/* Wait for all readers to drain.
+			 * Note: readers is signed (LONG), so underflow from bugs would
+			 * produce a negative value (still non-zero). The APC_LOCK_SPIN_MAX
+			 * force-reset below handles this as a safety net. */
 			while (lock->readers) {
 				if (++spins < APC_LOCK_SPIN_YIELD) {
 					YieldProcessor();
@@ -127,7 +132,7 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 				if (!hProc) {
 					/* Process doesn't exist anymore - force-reset the lock */
 					InterlockedExchange(&lock->writer, 0);
-					lock->writer_pid = 0;
+					InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
 					spins = 0;
 					continue;
 				} else {
@@ -135,7 +140,7 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 					if (GetExitCodeProcess(hProc, &exit_code) && exit_code != STILL_ACTIVE) {
 						CloseHandle(hProc);
 						InterlockedExchange(&lock->writer, 0);
-						lock->writer_pid = 0;
+						InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
 						spins = 0;
 						continue;
 					}
@@ -147,7 +152,7 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 		/* Force-reset after excessive spinning (guards against PID reuse edge case) */
 		if (spins > APC_LOCK_SPIN_MAX) {
 			InterlockedExchange(&lock->writer, 0);
-			lock->writer_pid = 0;
+			InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
 			spins = 0;
 			continue;
 		}
@@ -163,12 +168,13 @@ static inline zend_bool apc_lock_wlock_impl(apc_lock_t *lock) {
 PHP_APCU_API zend_bool apc_lock_wunlock(apc_lock_t *lock) {
 	/* Release barrier: ensure all data writes performed under the write lock
 	 * are visible to other processors BEFORE we clear the writer flag.
-	 * This is critical for cross-process correctness. */
+	 * This is critical for cross-process correctness.
+	 * Note: InterlockedExchange below has full barrier semantics on x86/x64,
+	 * making this MemoryBarrier technically redundant there. We keep it for
+	 * correctness on ARM64 Windows where Interlocked ops may have weaker
+	 * ordering guarantees. */
 	MemoryBarrier();
-	lock->writer_pid = 0;
-	/* InterlockedExchange has full barrier semantics on x86/x64,
-	 * ensuring the writer_pid=0 and all prior stores are visible
-	 * before the writer flag is cleared. */
+	InterlockedExchange((volatile LONG *)&lock->writer_pid, 0);
 	InterlockedExchange(&lock->writer, 0);
 	return 1;
 }

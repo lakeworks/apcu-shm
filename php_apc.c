@@ -334,7 +334,9 @@ static PHP_MINIT_FUNCTION(apcu)
 								apc_windows_shm_init_unlock(init_lock);
 								apc_windows_shm_detach(shm);
 								zend_error_noreturn(E_CORE_ERROR,
-									"APCu: Shared memory segment '%s' exists but initialization never completed (creator may have crashed)",
+									"APCu: Shared memory segment '%s' exists but initialization never completed. "
+									"The creating process likely crashed during init. "
+									"Recycle the IIS app pool to destroy the orphaned segment.",
 									APCG(shm_name));
 							}
 							SwitchToThread();
