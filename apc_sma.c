@@ -688,10 +688,17 @@ PHP_APCU_API void apc_sma_set_cache_info(apc_sma_t *sma, size_t cache_header_off
 	smaheader->cache_header_offset = cache_header_offset;
 	smaheader->nslots = nslots;
 
-	/* Store serializer name so attaching processes can detect mismatches. */
+	/* Store serializer name so attaching processes can detect mismatches.
+	 * Reject names that exceed the buffer — truncation would mask real
+	 * mismatches between distinct serializers sharing a long prefix. */
 	memset(smaheader->serializer_name, 0, sizeof(smaheader->serializer_name));
 	if (serializer_name && serializer_name[0]) {
-		strncpy(smaheader->serializer_name, serializer_name, sizeof(smaheader->serializer_name) - 1);
+		if (strlen(serializer_name) >= sizeof(smaheader->serializer_name)) {
+			apc_error("apc_sma_set_cache_info: apc.serializer name '%s' exceeds %zu-char limit",
+				serializer_name, sizeof(smaheader->serializer_name) - 1);
+			return;
+		}
+		memcpy(smaheader->serializer_name, serializer_name, strlen(serializer_name));
 	}
 
 	/* Full memory barrier + set completion flag LAST so attaching processes

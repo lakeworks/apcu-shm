@@ -356,13 +356,12 @@ static PHP_MINIT_FUNCTION(apcu)
 					/* Validate serializer matches creator's choice.
 					 * Different serializers produce incompatible byte
 					 * streams — using the wrong one corrupts data.
-					 * Compare only up to 31 chars (the shared header's
-					 * buffer size) so truncation doesn't cause a
-					 * false mismatch for long custom serializer names. */
+					 * Names > 31 chars are rejected at store time, so
+					 * exact strcmp is safe (no truncation possible). */
 					{
 						const char *creator_ser = apc_sma_get_serializer_name(&apc_sma);
 						const char *local_ser = APCG(serializer_name) ? APCG(serializer_name) : "";
-						if (creator_ser[0] && strncmp(creator_ser, local_ser, 31) != 0) {
+						if (creator_ser[0] && strcmp(creator_ser, local_ser) != 0) {
 							apc_windows_shm_init_unlock(init_lock);
 							apc_windows_shm_detach(shm);
 							zend_error_noreturn(E_CORE_ERROR,
